@@ -1,0 +1,12 @@
+/target
+
+# reference prog
+reference_program/
+
+# claude
+.claude
+nul
+
+# mds
+*.md
+!README.md
