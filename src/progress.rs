@@ -74,7 +74,12 @@ impl Reporter {
         );
         length_bar.set_prefix("Lengths");
 
-        let position_bar = multi.add(ProgressBar::new(0));
+        let initial_total = plan
+            .iter()
+            .find(|(_, n)| *n > 0)
+            .map(|(_, n)| *n as u64)
+            .unwrap_or(0);
+        let position_bar = multi.add(ProgressBar::new(initial_total));
         position_bar.set_style(
             ProgressStyle::with_template(
                 "{prefix:>9} [{bar:30.green/blue}] {pos}/{len}  {msg}",
@@ -100,6 +105,13 @@ impl Reporter {
     /// mode so the screener skips its progress emission entirely.
     pub fn sender(&self) -> Option<Sender<ProgressUpdate>> {
         self.sender.clone()
+    }
+
+    /// Borrow a clone of the underlying `MultiProgress` so other components
+    /// (e.g. the key listener) can emit status lines that play nicely with
+    /// the live bars.
+    pub fn multi(&self) -> Option<MultiProgress> {
+        self.multi.clone()
     }
 
     /// Drop the sender and wait for the worker thread to finalize the bars.

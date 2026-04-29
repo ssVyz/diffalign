@@ -18,6 +18,7 @@ use super::types::{
     AnalysisParams, ExclusivityResult, LengthResult, MismatchBucket, PairwiseParams,
     PositionResult, ProgressUpdate, ScreeningResults, WindowAnalysisResult,
 };
+use crate::pause::PauseFlag;
 
 /// Build the list of oligo lengths to process given min, max, and skip.
 ///
@@ -39,6 +40,7 @@ pub fn run_screening(
     params: &AnalysisParams,
     exclusivity: Option<&ReferenceData>,
     progress_tx: Option<Sender<ProgressUpdate>>,
+    pause: Option<PauseFlag>,
 ) -> ScreeningResults {
     let num_threads = params.thread_count.get_count();
     let pool = rayon::ThreadPoolBuilder::new()
@@ -92,6 +94,7 @@ pub fn run_screening(
                 length_idx as u32,
                 total_lengths,
                 &progress_tx,
+                pause.as_ref(),
             )
         });
 
@@ -111,6 +114,7 @@ fn analyze_length(
     length_idx: u32,
     total_lengths: u32,
     progress_tx: &Option<Sender<ProgressUpdate>>,
+    pause: Option<&PauseFlag>,
 ) -> LengthResult {
     let length = oligo_length as usize;
     let resolution = params.resolution as usize;
@@ -135,6 +139,9 @@ fn analyze_length(
         .map_init(
             move || create_aligner(length, max_seq_len, &pw_params),
             |aligner, &position| {
+                if let Some(p) = pause {
+                    p.wait_if_paused();
+                }
                 let analysis = analyze_window(
                     template_bytes,
                     ref_bytes,
@@ -368,7 +375,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = run_screening(&template, &references, &params, None, None);
+        let results = run_screening(&template, &references, &params, None, None, None);
         assert!(results.results_by_length.contains_key(&10));
 
         let length_result = results.results_by_length.get(&10).unwrap();
@@ -407,7 +414,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = run_screening(&template, &references, &params, Some(&exclusivity), None);
+        let results = run_screening(&template, &references, &params, Some(&exclusivity), None, None);
         let length_result = results.results_by_length.get(&10).unwrap();
         let first_pos = &length_result.positions[0];
 

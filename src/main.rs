@@ -11,6 +11,8 @@ use diffalign::analysis::{
 };
 use diffalign::cli::Cli;
 use diffalign::config::{self, Config};
+use diffalign::key_listener::KeyListener;
+use diffalign::pause::PauseFlag;
 use diffalign::progress::{Reporter, build_length_plan};
 
 #[global_allocator]
@@ -89,13 +91,6 @@ fn run() -> Result<()> {
         );
     }
 
-    let render_progress = !cli.quiet && io::stderr().is_terminal();
-    let reporter = if render_progress {
-        Reporter::new(plan)
-    } else {
-        Reporter::quiet()
-    };
-
     eprintln!(
         "diffalign: template={} ({} bp), references={}, {}{}using {}",
         template.name,
@@ -113,13 +108,33 @@ fn run() -> Result<()> {
         format_threads(&params.thread_count),
     );
 
+    let render_progress = !cli.quiet && io::stderr().is_terminal();
+    let reporter = if render_progress {
+        Reporter::new(plan)
+    } else {
+        Reporter::quiet()
+    };
+
+    let pause_flag = if render_progress {
+        Some(PauseFlag::new())
+    } else {
+        None
+    };
+
+    let _key_listener = match (pause_flag.clone(), reporter.multi()) {
+        (Some(pf), Some(multi)) => KeyListener::try_spawn(pf, multi),
+        _ => None,
+    };
+
     let results = run_screening(
         &template,
         &references,
         &params,
         exclusivity.as_ref(),
         reporter.sender(),
+        pause_flag,
     );
+    drop(_key_listener);
     reporter.finish();
 
     write_results(&results, output_path)?;
