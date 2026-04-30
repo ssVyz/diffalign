@@ -11,6 +11,8 @@ mod fasta;
 mod iupac;
 mod pairwise;
 mod screener;
+mod simple_align;
+mod simplescreen;
 mod types;
 
 pub use fasta::*;
@@ -23,3 +25,5 @@ pub use analyzer::*;
 pub use iupac::*;
 #[allow(unused_imports)]
 pub use pairwise::*;
+#[allow(unused_imports)]
+pub use simple_align::*;

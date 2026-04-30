@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use ini::Ini;
 
-use crate::analysis::{AnalysisMethod, PairwiseParams};
+use crate::analysis::{AlignerKind, AnalysisMethod, PairwiseParams, SimpleParams};
 
 pub const INI_FILE_NAME: &str = "diffalign.ini";
 
@@ -20,7 +20,9 @@ pub const INI_FILE_NAME: &str = "diffalign.ini";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub method: AnalysisMethod,
+    pub aligner: AlignerKind,
     pub pairwise: PairwiseParams,
+    pub simple: SimpleParams,
     pub exclude_n: bool,
     pub min_oligo_length: u32,
     pub max_oligo_length: u32,
@@ -35,7 +37,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Pairwise,
             pairwise: PairwiseParams::default(),
+            simple: SimpleParams::default(),
             exclude_n: true,
             min_oligo_length: 18,
             max_oligo_length: 25,
@@ -84,11 +88,24 @@ resolution = 1
 ; Target cumulative variant coverage percentage (0-100).
 coverage_threshold = 90.0
 
+[aligner]
+; Which alignment backend to use: pairwise | simple
+;   pairwise = rust-bio Smith-Waterman local alignment (gaps allowed by score,
+;              gapped/partial-coverage alignments are still rejected at the
+;              accept layer)
+;   simple   = bitap (substitutions-only). Faster; max oligo length is 64 bp;
+;              scans both forward and reverse-complement strands.
+kind = pairwise
+
 [pairwise]
 match_score = 2
 mismatch_score = -1
 gap_open_penalty = -2
 gap_extend_penalty = -1
+max_mismatches = 8
+
+[simple]
+; Maximum substitutions permitted per match for the bitap backend.
 max_mismatches = 8
 
 [threads]
@@ -147,6 +164,12 @@ pub fn load(path: &Path) -> Result<Config> {
     cfg.coverage_threshold =
         get_f64(analysis, "coverage_threshold")?.unwrap_or(cfg.coverage_threshold);
 
+    // [aligner]
+    let aligner = ini.section(Some("aligner"));
+    if let Some(kind) = get_str(aligner, "kind") {
+        cfg.aligner = parse_aligner_kind(&kind)?;
+    }
+
     // [pairwise]
     let pairwise = ini.section(Some("pairwise"));
     cfg.pairwise.match_score =
@@ -160,12 +183,28 @@ pub fn load(path: &Path) -> Result<Config> {
     cfg.pairwise.max_mismatches =
         get_u32(pairwise, "max_mismatches")?.unwrap_or(cfg.pairwise.max_mismatches);
 
+    // [simple]
+    let simple = ini.section(Some("simple"));
+    cfg.simple.max_mismatches =
+        get_u32(simple, "max_mismatches")?.unwrap_or(cfg.simple.max_mismatches);
+
     // [threads]
     let threads = ini.section(Some("threads"));
     cfg.threads_percent = get_u32(threads, "percent")?.unwrap_or(cfg.threads_percent);
 
     cfg.validate()?;
     Ok(cfg)
+}
+
+pub fn parse_aligner_kind(name: &str) -> Result<AlignerKind> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "pairwise" | "pw" | "rustbio" => Ok(AlignerKind::Pairwise),
+        "simple" | "simplescreen" | "bitap" => Ok(AlignerKind::Simple),
+        other => bail!(
+            "unknown aligner kind '{}' (expected: pairwise | simple)",
+            other
+        ),
+    }
 }
 
 impl Config {

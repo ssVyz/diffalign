@@ -14,11 +14,21 @@ use super::fasta::{ReferenceData, TemplateData};
 use super::pairwise::{
     DnaAligner, collect_matches_with_aligner, collect_mismatch_counts_with_aligner, create_aligner,
 };
+use super::simple_align::{
+    SimpleAligner, collect_matches_with_simple_aligner,
+    collect_mismatch_counts_with_simple_aligner, create_simple_aligner,
+};
 use super::types::{
-    AnalysisParams, ExclusivityResult, LengthResult, MismatchBucket, PairwiseParams,
-    PositionResult, ProgressUpdate, ScreeningResults, WindowAnalysisResult,
+    AlignerKind, AnalysisParams, ExclusivityResult, LengthResult, MismatchBucket, PositionResult,
+    ProgressUpdate, ScreeningResults, WindowAnalysisResult,
 };
 use crate::pause::PauseFlag;
+
+/// Per-worker aligner state, holding whichever backend is in use.
+enum WorkerAligner {
+    Pairwise(DnaAligner),
+    Simple(SimpleAligner),
+}
 
 /// Build the list of oligo lengths to process given min, max, and skip.
 ///
@@ -133,11 +143,20 @@ fn analyze_length(
         .unwrap_or(0);
     let max_seq_len = max_ref_len.max(max_excl_len);
     let pw_params = params.pairwise;
+    let aligner_kind = params.aligner;
+    let simple_params = params.simple.unwrap_or_default();
 
     let mut position_results: Vec<PositionResult> = positions
         .par_iter()
         .map_init(
-            move || create_aligner(length, max_seq_len, &pw_params),
+            move || match aligner_kind {
+                AlignerKind::Pairwise => {
+                    WorkerAligner::Pairwise(create_aligner(length, max_seq_len, &pw_params))
+                }
+                AlignerKind::Simple => {
+                    WorkerAligner::Simple(create_simple_aligner(&simple_params))
+                }
+            },
             |aligner, &position| {
                 if let Some(p) = pause {
                     p.wait_if_paused();
@@ -156,7 +175,7 @@ fn analyze_length(
                         template_bytes,
                         eb,
                         excl_names.unwrap(),
-                        &params.pairwise,
+                        params,
                         position,
                         length,
                         aligner,
@@ -207,13 +226,20 @@ fn analyze_window(
     params: &AnalysisParams,
     position: usize,
     length: usize,
-    aligner: &mut DnaAligner,
+    aligner: &mut WorkerAligner,
 ) -> WindowAnalysisResult {
     let oligo = &template_bytes[position..position + length];
     let total_refs = ref_bytes.len();
 
-    let (matched_sequences, no_match_count) =
-        collect_matches_with_aligner(aligner, oligo, ref_bytes, &params.pairwise);
+    let (matched_sequences, no_match_count) = match aligner {
+        WorkerAligner::Pairwise(a) => {
+            collect_matches_with_aligner(a, oligo, ref_bytes, &params.pairwise)
+        }
+        WorkerAligner::Simple(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_matches_with_simple_aligner(a, oligo, ref_bytes, &sp)
+        }
+    };
 
     if matched_sequences.is_empty() {
         return WindowAnalysisResult {
@@ -269,13 +295,21 @@ fn analyze_exclusivity(
     template_bytes: &[u8],
     excl_bytes: &[Vec<u8>],
     excl_names: &[String],
-    params: &PairwiseParams,
+    params: &AnalysisParams,
     position: usize,
     length: usize,
-    aligner: &mut DnaAligner,
+    aligner: &mut WorkerAligner,
 ) -> ExclusivityResult {
     let oligo = &template_bytes[position..position + length];
-    let mismatch_counts = collect_mismatch_counts_with_aligner(aligner, oligo, excl_bytes, params);
+    let mismatch_counts = match aligner {
+        WorkerAligner::Pairwise(a) => {
+            collect_mismatch_counts_with_aligner(a, oligo, excl_bytes, &params.pairwise)
+        }
+        WorkerAligner::Simple(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_mismatch_counts_with_simple_aligner(a, oligo, excl_bytes, &sp)
+        }
+    };
 
     let mut buckets: std::collections::HashMap<u32, (usize, String)> =
         std::collections::HashMap::new();

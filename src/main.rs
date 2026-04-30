@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
@@ -27,6 +28,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let started = Instant::now();
+    let timer_enabled = cli.timer;
 
     let ini_path = match &cli.config {
         Some(path) => path.clone(),
@@ -140,7 +143,26 @@ fn run() -> Result<()> {
     write_results(&results, output_path)?;
 
     eprintln!("✓ wrote {}", output_path.display());
+    if timer_enabled {
+        let elapsed = started.elapsed();
+        eprintln!("elapsed: {}", format_duration(elapsed));
+    }
     Ok(())
+}
+
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let millis = d.subsec_millis();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{}h {:02}m {:02}.{:03}s", hours, minutes, seconds, millis)
+    } else if minutes > 0 {
+        format!("{}m {:02}.{:03}s", minutes, seconds, millis)
+    } else {
+        format!("{}.{:03}s", seconds, millis)
+    }
 }
 
 fn cmd_mkini(path: &Path) -> Result<()> {

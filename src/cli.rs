@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{ArgAction, Parser};
 
-use crate::analysis::{AnalysisMethod, AnalysisParams, PairwiseParams, ThreadCount};
-use crate::config::Config;
+use crate::analysis::{
+    AlignerKind, AnalysisMethod, AnalysisParams, PairwiseParams, SimpleParams, ThreadCount,
+};
+use crate::config::{Config, parse_aligner_kind};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,6 +60,11 @@ pub struct Cli {
     #[arg(long, value_name = "N|none")]
     pub incremental_max_amb: Option<String>,
 
+    // ── aligner backend ───────────────────────────────────────────────
+    /// Alignment backend: pairwise (Smith-Waterman) | simple (bitap, ≤64 bp).
+    #[arg(short = 'a', long = "aligner", value_parser = ["pairwise", "simple"])]
+    pub aligner: Option<String>,
+
     // ── pairwise ──────────────────────────────────────────────────────
     #[arg(long)]
     pub match_score: Option<i32>,
@@ -67,6 +74,8 @@ pub struct Cli {
     pub gap_open_penalty: Option<i32>,
     #[arg(long)]
     pub gap_extend_penalty: Option<i32>,
+    /// Maximum substitutions allowed per match. Applies to whichever
+    /// aligner backend is selected.
     #[arg(long)]
     pub max_mismatches: Option<u32>,
 
@@ -104,6 +113,10 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
+    /// Print elapsed wall-clock time at the end of the run.
+    #[arg(long)]
+    pub timer: bool,
+
     // ── config management ─────────────────────────────────────────────
     /// Write a default diffalign.ini next to the binary and exit.
     #[arg(long, exclusive = true)]
@@ -138,12 +151,21 @@ impl Cli {
         // Build method, allowing per-flag overrides on top of the INI choice.
         let method = self.resolve_method(cfg)?;
 
+        let aligner = match &self.aligner {
+            Some(s) => parse_aligner_kind(s)?,
+            None => cfg.aligner,
+        };
+
         let pairwise = PairwiseParams {
             match_score: self.match_score.unwrap_or(cfg.pairwise.match_score),
             mismatch_score: self.mismatch_score.unwrap_or(cfg.pairwise.mismatch_score),
             gap_open_penalty: self.gap_open_penalty.unwrap_or(cfg.pairwise.gap_open_penalty),
             gap_extend_penalty: self.gap_extend_penalty.unwrap_or(cfg.pairwise.gap_extend_penalty),
             max_mismatches: self.max_mismatches.unwrap_or(cfg.pairwise.max_mismatches),
+        };
+
+        let simple = SimpleParams {
+            max_mismatches: self.max_mismatches.unwrap_or(cfg.simple.max_mismatches),
         };
 
         let exclude_n = self.exclude_n_override().unwrap_or(cfg.exclude_n);
@@ -173,6 +195,25 @@ impl Cli {
                 coverage_threshold
             );
         }
+        if aligner == AlignerKind::Simple {
+            const SIMPLE_MAX: u32 = 64;
+            if max_oligo_length > SIMPLE_MAX {
+                bail!(
+                    "aligner = simple supports oligos up to {} bp; got max_oligo_length = {}.\n\
+                     Lower max_oligo_length (and min_oligo_length) to <= {}, or use --aligner pairwise.",
+                    SIMPLE_MAX,
+                    max_oligo_length,
+                    SIMPLE_MAX
+                );
+            }
+            if simple.max_mismatches >= min_oligo_length {
+                bail!(
+                    "max_mismatches ({}) must be strictly less than min_oligo_length ({}) when aligner = simple",
+                    simple.max_mismatches,
+                    min_oligo_length
+                );
+            }
+        }
 
         let threads_percent = self.threads_percent.unwrap_or(cfg.threads_percent);
         if threads_percent == 0 || threads_percent > 100 {
@@ -183,9 +224,17 @@ impl Cli {
         }
         let thread_count = resolve_threads(threads_percent);
 
+        let simple_field = if aligner == AlignerKind::Simple {
+            Some(simple)
+        } else {
+            None
+        };
+
         Ok(AnalysisParams {
             method,
             pairwise,
+            aligner,
+            simple: simple_field,
             exclude_n,
             min_oligo_length,
             max_oligo_length,

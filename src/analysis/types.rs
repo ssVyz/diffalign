@@ -78,14 +78,62 @@ impl Default for PairwiseParams {
     }
 }
 
+/// Parameters for the simplescreen (bitap) aligner.
+///
+/// `max_mismatches` is the only knob the bitap algorithm needs. The four
+/// scoring fields on `PairwiseParams` are SW-specific and don't apply here.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SimpleParams {
+    pub max_mismatches: u32,
+}
+
+impl Default for SimpleParams {
+    fn default() -> Self {
+        Self { max_mismatches: 8 }
+    }
+}
+
+/// Which alignment backend to use for screening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlignerKind {
+    Pairwise,
+    Simple,
+}
+
+impl Default for AlignerKind {
+    fn default() -> Self {
+        Self::Pairwise
+    }
+}
+
+impl AlignerKind {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Pairwise)
+    }
+}
+
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_default_aligner(k: &AlignerKind) -> bool {
+    k.is_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisParams {
     pub method: AnalysisMethod,
     pub pairwise: PairwiseParams,
+    /// Selected alignment backend. Omitted from JSON output when set to the
+    /// default (`Pairwise`) so default-config output stays byte-identical to
+    /// files written before the simple-aligner option existed.
+    #[serde(default, skip_serializing_if = "is_default_aligner")]
+    pub aligner: AlignerKind,
+    /// Parameters for the simple (bitap) aligner. Only present in JSON output
+    /// when `aligner = Simple`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simple: Option<SimpleParams>,
     pub exclude_n: bool,
     pub min_oligo_length: u32,
     pub max_oligo_length: u32,
@@ -106,6 +154,8 @@ impl Default for AnalysisParams {
         Self {
             method: AnalysisMethod::NoAmbiguities,
             pairwise: PairwiseParams::default(),
+            aligner: AlignerKind::Pairwise,
+            simple: None,
             exclude_n: true,
             min_oligo_length: 18,
             max_oligo_length: 25,
