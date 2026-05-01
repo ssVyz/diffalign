@@ -270,6 +270,24 @@ fn analyze_window(
         for variant in &mut result.variants {
             variant.percentage = (variant.count as f64 / total_f) * 100.0;
         }
+    }
+
+    let var_limit_applied = if let Some(limit) = params.var_limit {
+        let limit = limit as usize;
+        if result.variants.len() > limit {
+            let dropped_count: usize = result.variants[limit..].iter().map(|v| v.count).sum();
+            result.variants.truncate(limit);
+            result.no_match_count += dropped_count;
+            result.sequences_analyzed = result.sequences_analyzed.saturating_sub(dropped_count);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if total_refs > matched_sequences.len() || var_limit_applied {
         let mut cumulative = 0.0;
         let mut new_variants_needed = result.variants.len();
         let mut new_coverage = 0.0;
@@ -457,5 +475,52 @@ mod tests {
         assert_eq!(excl.total_sequences, 2);
         assert!(results.differential_enabled);
         assert_eq!(results.exclusivity_sequence_count, Some(2));
+    }
+
+    #[test]
+    fn var_limit_folds_dropped_variants_into_no_match() {
+        // Use the simple (bitap) aligner with max_mismatches=2 so each
+        // single-base-substituted reference returns a full-length matched
+        // fragment. Without a limit this position would have 4 variants;
+        // with var_limit = 2 the bottom two are dropped and folded into
+        // no_match.
+        use crate::analysis::types::{AlignerKind, SimpleParams};
+
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "ACACACACACACACACACAC".to_string(),
+        };
+        let references = ReferenceData {
+            names: vec!["R1".into(), "R2".into(), "R3".into(), "R4".into()],
+            sequences: vec![
+                "ACACACACACACACACACAC".into(),
+                "ACACACACACACACACACAA".into(),
+                "ACACACACACACACACACAG".into(),
+                "ACACACACACACACACACAT".into(),
+            ],
+        };
+
+        let params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 2 }),
+            min_oligo_length: 20,
+            max_oligo_length: 20,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            var_limit: Some(2),
+            ..Default::default()
+        };
+
+        let results = run_screening(&template, &references, &params, None, None, None);
+        let pos = &results.results_by_length.get(&20).unwrap().positions[0];
+        let a = &pos.analysis;
+
+        assert_eq!(a.variants.len(), 2);
+        assert_eq!(a.total_sequences, 4);
+        assert_eq!(a.sequences_analyzed, 2);
+        assert_eq!(a.no_match_count, 2);
+        let kept_count: usize = a.variants.iter().map(|v| v.count).sum();
+        assert_eq!(kept_count + a.no_match_count, a.total_sequences);
     }
 }

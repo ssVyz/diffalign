@@ -147,6 +147,11 @@ pub struct AnalysisParams {
     /// byte-identical to files written by the original tool.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub length_skip: u32,
+    /// Maximum number of variants recorded per position. `None` = unlimited.
+    /// When set and exceeded, the trailing variants are dropped and their
+    /// counts are folded into the no-match category for that position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_limit: Option<u32>,
 }
 
 impl Default for AnalysisParams {
@@ -163,6 +168,7 @@ impl Default for AnalysisParams {
             coverage_threshold: 90.0,
             thread_count: ThreadCount::Auto,
             length_skip: 0,
+            var_limit: None,
         }
     }
 }

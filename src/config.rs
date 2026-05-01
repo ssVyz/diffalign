@@ -31,6 +31,8 @@ pub struct Config {
     pub coverage_threshold: f64,
     /// Threads as a percentage of available cores. 0 < x <= 100.
     pub threads_percent: u32,
+    /// Maximum variants recorded per position. `None` = unlimited.
+    pub var_limit: Option<u32>,
 }
 
 impl Default for Config {
@@ -47,6 +49,7 @@ impl Default for Config {
             resolution: 1,
             coverage_threshold: 90.0,
             threads_percent: 100,
+            var_limit: None,
         }
     }
 }
@@ -87,6 +90,12 @@ resolution = 1
 
 ; Target cumulative variant coverage percentage (0-100).
 coverage_threshold = 90.0
+
+; Maximum number of variants recorded per position.
+; Leave empty (or 0) for no limit. When the limit is reached, the
+; remaining variants' counts are folded into the no-match category
+; for that position. Useful for keeping output JSON files manageable.
+var_limit =
 
 [aligner]
 ; Which alignment backend to use: pairwise | simple
@@ -163,6 +172,8 @@ pub fn load(path: &Path) -> Result<Config> {
     cfg.resolution = get_u32(analysis, "resolution")?.unwrap_or(cfg.resolution);
     cfg.coverage_threshold =
         get_f64(analysis, "coverage_threshold")?.unwrap_or(cfg.coverage_threshold);
+    // var_limit: empty or 0 means unlimited.
+    cfg.var_limit = get_optional_u32(analysis, "var_limit")?.filter(|&n| n > 0);
 
     // [aligner]
     let aligner = ini.section(Some("aligner"));

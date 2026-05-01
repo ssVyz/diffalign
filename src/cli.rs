@@ -102,6 +102,13 @@ pub struct Cli {
     #[arg(long)]
     pub coverage_threshold: Option<f64>,
 
+    /// Maximum number of variants recorded per position.
+    /// Pass `none` (or `0`) for no limit. When set and exceeded, the
+    /// remaining variants' counts are folded into the no-match category
+    /// for that position.
+    #[arg(long = "var-limit", value_name = "N|none")]
+    pub var_limit: Option<String>,
+
     // ── threads ───────────────────────────────────────────────────────
     /// Percentage of available CPU cores to use (1-100).
     /// Resolved to a concrete core count (floor, min 1) at run time.
@@ -175,6 +182,10 @@ impl Cli {
         let length_skip = self.length_skip.unwrap_or(cfg.length_skip);
         let resolution = self.resolution.unwrap_or(cfg.resolution);
         let coverage_threshold = self.coverage_threshold.unwrap_or(cfg.coverage_threshold);
+        let var_limit = match &self.var_limit {
+            Some(s) => parse_optional_u32(s, "--var-limit")?.filter(|&n| n > 0),
+            None => cfg.var_limit,
+        };
 
         if min_oligo_length == 0 {
             bail!("min_oligo_length must be >= 1");
@@ -242,6 +253,7 @@ impl Cli {
             coverage_threshold,
             thread_count,
             length_skip,
+            var_limit,
         })
     }
 
@@ -269,7 +281,7 @@ impl Cli {
             incr_pct = v;
         }
         if let Some(v) = &self.incremental_max_amb {
-            incr_max_amb = parse_optional_amb(v)?;
+            incr_max_amb = parse_optional_u32(v, "--incremental-max-amb")?;
         }
 
         match method_name {
@@ -286,7 +298,7 @@ impl Cli {
     }
 }
 
-fn parse_optional_amb(value: &str) -> Result<Option<u32>> {
+fn parse_optional_u32(value: &str, flag_name: &str) -> Result<Option<u32>> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
         return Ok(None);
@@ -294,7 +306,7 @@ fn parse_optional_amb(value: &str) -> Result<Option<u32>> {
     trimmed
         .parse::<u32>()
         .map(Some)
-        .map_err(|e| anyhow::anyhow!("invalid value for --incremental-max-amb: {}", e))
+        .map_err(|e| anyhow::anyhow!("invalid value for {}: {}", flag_name, e))
 }
 
 /// Resolve a percentage to a concrete `ThreadCount::Fixed(N)`.
@@ -335,11 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_optional_amb_handles_none_keyword() {
-        assert_eq!(parse_optional_amb("none").unwrap(), None);
-        assert_eq!(parse_optional_amb("NONE").unwrap(), None);
-        assert_eq!(parse_optional_amb("").unwrap(), None);
-        assert_eq!(parse_optional_amb("3").unwrap(), Some(3));
-        assert!(parse_optional_amb("foo").is_err());
+    fn parse_optional_u32_handles_none_keyword() {
+        assert_eq!(parse_optional_u32("none", "--x").unwrap(), None);
+        assert_eq!(parse_optional_u32("NONE", "--x").unwrap(), None);
+        assert_eq!(parse_optional_u32("", "--x").unwrap(), None);
+        assert_eq!(parse_optional_u32("3", "--x").unwrap(), Some(3));
+        assert!(parse_optional_u32("foo", "--x").is_err());
     }
 }
