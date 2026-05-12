@@ -98,12 +98,15 @@ coverage_threshold = 90.0
 var_limit =
 
 [aligner]
-; Which alignment backend to use: pairwise | simple
-;   pairwise = rust-bio Smith-Waterman local alignment (gaps allowed by score,
-;              gapped/partial-coverage alignments are still rejected at the
-;              accept layer)
-;   simple   = bitap (substitutions-only). Faster; max oligo length is 64 bp;
-;              scans both forward and reverse-complement strands.
+; Which alignment backend to use: pairwise | simple | simple_simd
+;   pairwise    = rust-bio Smith-Waterman local alignment (gaps allowed by score,
+;                 gapped/partial-coverage alignments are still rejected at the
+;                 accept layer)
+;   simple      = bitap (substitutions-only). Faster; max oligo length is 64 bp;
+;                 scans both forward and reverse-complement strands.
+;   simple_simd = same algorithm as simple, AVX2-vectorized across references.
+;                 Requires a CPU with AVX2; the program errors out at startup
+;                 if AVX2 is not detected. Output is bit-identical to simple.
 kind = pairwise
 
 [pairwise]
@@ -211,8 +214,9 @@ pub fn parse_aligner_kind(name: &str) -> Result<AlignerKind> {
     match name.trim().to_ascii_lowercase().as_str() {
         "pairwise" | "pw" | "rustbio" => Ok(AlignerKind::Pairwise),
         "simple" | "simplescreen" | "bitap" => Ok(AlignerKind::Simple),
+        "simple_simd" | "simd" | "simplesimd" => Ok(AlignerKind::SimpleSimd),
         other => bail!(
-            "unknown aligner kind '{}' (expected: pairwise | simple)",
+            "unknown aligner kind '{}' (expected: pairwise | simple | simple_simd)",
             other
         ),
     }

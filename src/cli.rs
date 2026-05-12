@@ -61,8 +61,9 @@ pub struct Cli {
     pub incremental_max_amb: Option<String>,
 
     // ── aligner backend ───────────────────────────────────────────────
-    /// Alignment backend: pairwise (Smith-Waterman) | simple (bitap, ≤64 bp).
-    #[arg(short = 'a', long = "aligner", value_parser = ["pairwise", "simple"])]
+    /// Alignment backend: pairwise (Smith-Waterman) | simple (bitap, ≤64 bp) |
+    /// simple_simd (AVX2-vectorized bitap; requires CPU AVX2 support).
+    #[arg(short = 'a', long = "aligner", value_parser = ["pairwise", "simple", "simple_simd", "simd"])]
     pub aligner: Option<String>,
 
     // ── pairwise ──────────────────────────────────────────────────────
@@ -206,12 +207,13 @@ impl Cli {
                 coverage_threshold
             );
         }
-        if aligner == AlignerKind::Simple {
+        if aligner.is_bitap() {
             const SIMPLE_MAX: u32 = 64;
             if max_oligo_length > SIMPLE_MAX {
                 bail!(
-                    "aligner = simple supports oligos up to {} bp; got max_oligo_length = {}.\n\
+                    "aligner = {} supports oligos up to {} bp; got max_oligo_length = {}.\n\
                      Lower max_oligo_length (and min_oligo_length) to <= {}, or use --aligner pairwise.",
+                    aligner_name(aligner),
                     SIMPLE_MAX,
                     max_oligo_length,
                     SIMPLE_MAX
@@ -219,11 +221,16 @@ impl Cli {
             }
             if simple.max_mismatches >= min_oligo_length {
                 bail!(
-                    "max_mismatches ({}) must be strictly less than min_oligo_length ({}) when aligner = simple",
+                    "max_mismatches ({}) must be strictly less than min_oligo_length ({}) when aligner = {}",
                     simple.max_mismatches,
-                    min_oligo_length
+                    min_oligo_length,
+                    aligner_name(aligner)
                 );
             }
+        }
+
+        if aligner == AlignerKind::SimpleSimd {
+            ensure_avx2_available()?;
         }
 
         let threads_percent = self.threads_percent.unwrap_or(cfg.threads_percent);
@@ -235,7 +242,7 @@ impl Cli {
         }
         let thread_count = resolve_threads(threads_percent);
 
-        let simple_field = if aligner == AlignerKind::Simple {
+        let simple_field = if aligner.is_bitap() {
             Some(simple)
         } else {
             None
@@ -295,6 +302,36 @@ impl Cli {
             }
             other => bail!("unknown method '{}'", other),
         }
+    }
+}
+
+fn aligner_name(k: AlignerKind) -> &'static str {
+    match k {
+        AlignerKind::Pairwise => "pairwise",
+        AlignerKind::Simple => "simple",
+        AlignerKind::SimpleSimd => "simple_simd",
+    }
+}
+
+/// Refuse to run when `simple_simd` was selected but the CPU (or build target)
+/// does not advertise AVX2.
+fn ensure_avx2_available() -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return Ok(());
+        }
+        bail!(
+            "aligner = simple_simd requires AVX2, but this CPU does not advertise it.\n\
+             Use --aligner simple (same algorithm, scalar) or --aligner pairwise instead."
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        bail!(
+            "aligner = simple_simd is only available on x86_64 builds.\n\
+             Use --aligner simple (same algorithm, scalar) or --aligner pairwise instead."
+        );
     }
 }
 

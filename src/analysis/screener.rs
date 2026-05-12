@@ -14,6 +14,10 @@ use super::fasta::{ReferenceData, TemplateData};
 use super::pairwise::{
     DnaAligner, collect_matches_with_aligner, collect_mismatch_counts_with_aligner, create_aligner,
 };
+use super::simd_align::{
+    SimdAligner, collect_matches_with_simd_aligner,
+    collect_mismatch_counts_with_simd_aligner, create_simd_aligner,
+};
 use super::simple_align::{
     SimpleAligner, collect_matches_with_simple_aligner,
     collect_mismatch_counts_with_simple_aligner, create_simple_aligner,
@@ -28,6 +32,7 @@ use crate::pause::PauseFlag;
 enum WorkerAligner {
     Pairwise(DnaAligner),
     Simple(SimpleAligner),
+    SimpleSimd(SimdAligner),
 }
 
 /// Build the list of oligo lengths to process given min, max, and skip.
@@ -156,6 +161,9 @@ fn analyze_length(
                 AlignerKind::Simple => {
                     WorkerAligner::Simple(create_simple_aligner(&simple_params))
                 }
+                AlignerKind::SimpleSimd => {
+                    WorkerAligner::SimpleSimd(create_simd_aligner(&simple_params))
+                }
             },
             |aligner, &position| {
                 if let Some(p) = pause {
@@ -238,6 +246,10 @@ fn analyze_window(
         WorkerAligner::Simple(a) => {
             let sp = params.simple.unwrap_or_default();
             collect_matches_with_simple_aligner(a, oligo, ref_bytes, &sp)
+        }
+        WorkerAligner::SimpleSimd(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_matches_with_simd_aligner(a, oligo, ref_bytes, &sp)
         }
     };
 
@@ -326,6 +338,10 @@ fn analyze_exclusivity(
         WorkerAligner::Simple(a) => {
             let sp = params.simple.unwrap_or_default();
             collect_mismatch_counts_with_simple_aligner(a, oligo, excl_bytes, &sp)
+        }
+        WorkerAligner::SimpleSimd(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_mismatch_counts_with_simd_aligner(a, oligo, excl_bytes, &sp)
         }
     };
 
@@ -522,5 +538,163 @@ mod tests {
         assert_eq!(a.no_match_count, 2);
         let kept_count: usize = a.variants.iter().map(|v| v.count).sum();
         assert_eq!(kept_count + a.no_match_count, a.total_sequences);
+    }
+
+    /// SimpleSimd is required to produce bit-identical results to Simple on
+    /// the same inputs (same recurrence, same per-reference state). This is
+    /// the regression test that pins that invariant; if you see it fail,
+    /// the SIMD kernel diverged from the scalar bitap.
+    #[test]
+    fn simple_simd_matches_simple_on_screening_results() {
+        use crate::analysis::types::{AlignerKind, SimpleParams};
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") {
+                eprintln!("skipping simple_simd equivalence test: AVX2 not available");
+                return;
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            eprintln!("skipping simple_simd equivalence test: not x86_64");
+            return;
+        }
+
+        // Template + references chosen to exercise: full SIMD batches,
+        // a non-LANES-divisible tail, forward and reverse-complement matches,
+        // mismatches up to k, and references shorter than the longest in
+        // their batch.
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATGTTCTAGAAATGGGCTGTACGTACGTACGTACGTACGTACGT".to_string(),
+        };
+        let references = ReferenceData {
+            names: (0..11).map(|i| format!("R{}", i)).collect(),
+            sequences: vec![
+                "TATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),     // exact fwd
+                "AATATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),   // exact fwd, offset
+                "TATGGTTCGTCATGTTCTAGAAATGGGCTGT".to_string(),     // 1mm fwd
+                "GTATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),    // exact fwd, offset
+                // RC of "TATGGTACGT" is "ACGTACCATA"
+                "NNNNACGTACCATANNNNNNNNNNNNNNNNNN".to_string(),    // RC match
+                "GGGGGGGGGGGG".to_string(),                        // shorter, no match
+                "TATGGTACGTCATG".to_string(),                      // exact fwd, short ref
+                "NNNNNNNN".to_string(),                            // too short / no match
+                "TATGGTACGGCATGTTCT".to_string(),                  // 1mm
+                "TATGGTACGT".to_string(),                          // exact, length == oligo
+                "TATGGTACATCATG".to_string(),                      // 1mm fwd
+            ],
+        };
+        let exclusivity = ReferenceData {
+            names: (0..6).map(|i| format!("E{}", i)).collect(),
+            sequences: vec![
+                "TATGGTACGTCATG".to_string(),     // exact
+                "AAAAAAAAAAAAAA".to_string(),     // none
+                "TATGGTTCGTCATG".to_string(),     // 1 mm
+                "NNNNACGTACCATANNNN".to_string(), // RC
+                "GG".to_string(),                 // too short
+                "TATGGTACATCATG".to_string(),     // 1 mm
+            ],
+        };
+
+        let mut params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 2 }),
+            min_oligo_length: 10,
+            max_oligo_length: 14,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            ..Default::default()
+        };
+
+        let simple_results = run_screening(
+            &template,
+            &references,
+            &params,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        params.aligner = AlignerKind::SimpleSimd;
+        let simd_results = run_screening(
+            &template,
+            &references,
+            &params,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        // Normalize before comparing:
+        //   1. Drop the `aligner` field (the only legitimate difference).
+        //   2. Sort every `variants` array by (count desc, sequence asc).
+        //      `find_variants_no_ambiguities` builds variants from a HashMap
+        //      and stable-sorts by count only; tied counts keep nondeterministic
+        //      HashMap iteration order, which would otherwise cause two runs
+        //      of the *same* aligner to diverge in serialization. The SIMD
+        //      backend is exact-equivalent to scalar at the matched-fragment
+        //      level — this normalization isolates that invariant.
+        fn normalize(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    map.remove("aligner");
+                    for (k, child) in map.iter_mut() {
+                        if k == "variants" {
+                            if let Some(arr) = child.as_array_mut() {
+                                arr.sort_by(|a, b| {
+                                    let ca = a.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+                                    let cb = b.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+                                    cb.cmp(&ca).then_with(|| {
+                                        let sa = a
+                                            .get("sequence")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        let sb = b
+                                            .get("sequence")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        sa.cmp(sb)
+                                    })
+                                });
+                            }
+                        }
+                        normalize(child);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for child in arr.iter_mut() {
+                        normalize(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut lhs = serde_json::to_value(&simple_results).unwrap();
+        let mut rhs = serde_json::to_value(&simd_results).unwrap();
+        normalize(&mut lhs);
+        normalize(&mut rhs);
+        if lhs != rhs {
+            let lhs_s = serde_json::to_string_pretty(&lhs).unwrap();
+            let rhs_s = serde_json::to_string_pretty(&rhs).unwrap();
+            let lhs_lines: Vec<&str> = lhs_s.lines().collect();
+            let rhs_lines: Vec<&str> = rhs_s.lines().collect();
+            for (i, (l, r)) in lhs_lines.iter().zip(rhs_lines.iter()).enumerate() {
+                if l != r {
+                    let lo = i.saturating_sub(3);
+                    let hi = (i + 4).min(lhs_lines.len()).min(rhs_lines.len());
+                    eprintln!("first diff context (lines {}..{}):", lo + 1, hi);
+                    for j in lo..hi {
+                        let mark = if j == i { ">>" } else { "  " };
+                        eprintln!("{} L{:>3}: simple      | {}", mark, j + 1, lhs_lines[j]);
+                        eprintln!("{} L{:>3}: simple_simd | {}", mark, j + 1, rhs_lines[j]);
+                    }
+                    break;
+                }
+            }
+            panic!("simple_simd diverged from simple");
+        }
     }
 }

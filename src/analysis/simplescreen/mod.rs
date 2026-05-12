@@ -9,6 +9,8 @@
 #![allow(dead_code)]
 
 pub mod bitap;
+#[cfg(target_arch = "x86_64")]
+pub mod bitap_simd;
 pub mod iupac;
 pub mod pattern;
 pub mod screener;

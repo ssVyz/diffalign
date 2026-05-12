@@ -11,6 +11,7 @@ mod fasta;
 mod iupac;
 mod pairwise;
 mod screener;
+mod simd_align;
 mod simple_align;
 mod simplescreen;
 mod types;
@@ -27,3 +28,5 @@ pub use iupac::*;
 pub use pairwise::*;
 #[allow(unused_imports)]
 pub use simple_align::*;
+#[allow(unused_imports)]
+pub use simd_align::*;

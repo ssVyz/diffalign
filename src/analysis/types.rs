@@ -94,11 +94,16 @@ impl Default for SimpleParams {
 }
 
 /// Which alignment backend to use for screening.
+///
+/// `snake_case` rename is identical to `lowercase` for the single-word variants
+/// (`Pairwise`, `Simple`) so legacy JSON files continue to round-trip; it only
+/// affects `SimpleSimd`, which becomes `"simple_simd"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum AlignerKind {
     Pairwise,
     Simple,
+    SimpleSimd,
 }
 
 impl Default for AlignerKind {
@@ -110,6 +115,12 @@ impl Default for AlignerKind {
 impl AlignerKind {
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Pairwise)
+    }
+
+    /// True if this kind uses the bitap (simplescreen) algorithm under the
+    /// hood (whether scalar or SIMD-vectorized).
+    pub fn is_bitap(&self) -> bool {
+        matches!(self, Self::Simple | Self::SimpleSimd)
     }
 }
 
