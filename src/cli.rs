@@ -10,6 +10,10 @@ use crate::analysis::{
 };
 use crate::config::{Config, parse_aligner_kind};
 
+/// CUDA kernel cap on `max_mismatches`. Kept in sync with
+/// `DIFFALIGN_CUDA_MAX_K` in `cuda/diffalign_cuda.h`.
+const CUDA_MAX_K: u32 = 16;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "diffalign",
@@ -62,8 +66,14 @@ pub struct Cli {
 
     // ── aligner backend ───────────────────────────────────────────────
     /// Alignment backend: pairwise (Smith-Waterman) | simple (bitap, ≤64 bp) |
-    /// simple_simd (AVX2-vectorized bitap; requires CPU AVX2 support).
-    #[arg(short = 'a', long = "aligner", value_parser = ["pairwise", "simple", "simple_simd", "simd"])]
+    /// simple_simd (AVX2-vectorized bitap; requires CPU AVX2 support) |
+    /// simple_cuda (GPU bitap; requires NVIDIA GPU + CUDA runtime; restricted
+    /// to --method none).
+    #[arg(
+        short = 'a',
+        long = "aligner",
+        value_parser = ["pairwise", "simple", "simple_simd", "simd", "simple_cuda", "cuda", "gpu"]
+    )]
     pub aligner: Option<String>,
 
     // ── pairwise ──────────────────────────────────────────────────────
@@ -233,6 +243,27 @@ impl Cli {
             ensure_avx2_available()?;
         }
 
+        if aligner == AlignerKind::SimpleCuda {
+            ensure_cuda_supported()?;
+            // CUDA backend is restricted to NoAmbiguities variant search.
+            if !matches!(method, AnalysisMethod::NoAmbiguities) {
+                bail!(
+                    "aligner = simple_cuda only supports --method none (no ambiguities).\n\
+                     Got --method {}. Either switch the variant method to `none`, or pick a \
+                     non-CUDA aligner.",
+                    method_name(&method),
+                );
+            }
+            if simple.max_mismatches > CUDA_MAX_K {
+                bail!(
+                    "aligner = simple_cuda caps max_mismatches at {} (got {}).\n\
+                     Lower max_mismatches, or use --aligner simple (no cap).",
+                    CUDA_MAX_K,
+                    simple.max_mismatches
+                );
+            }
+        }
+
         let threads_percent = self.threads_percent.unwrap_or(cfg.threads_percent);
         if threads_percent == 0 || threads_percent > 100 {
             bail!(
@@ -310,6 +341,15 @@ fn aligner_name(k: AlignerKind) -> &'static str {
         AlignerKind::Pairwise => "pairwise",
         AlignerKind::Simple => "simple",
         AlignerKind::SimpleSimd => "simple_simd",
+        AlignerKind::SimpleCuda => "simple_cuda",
+    }
+}
+
+fn method_name(m: &AnalysisMethod) -> &'static str {
+    match m {
+        AnalysisMethod::NoAmbiguities => "none",
+        AnalysisMethod::FixedAmbiguities(_) => "fixed",
+        AnalysisMethod::Incremental(_, _) => "incremental",
     }
 }
 
@@ -333,6 +373,33 @@ fn ensure_avx2_available() -> Result<()> {
              Use --aligner simple (same algorithm, scalar) or --aligner pairwise instead."
         );
     }
+}
+
+/// Refuse to run when `simple_cuda` was requested but this build was not
+/// compiled with the `cuda` feature, or no CUDA-capable GPU is available at
+/// runtime.
+#[cfg(feature = "cuda")]
+fn ensure_cuda_supported() -> Result<()> {
+    // Attempt to initialize CUDA up front. If this fails, the GPU is
+    // missing, the runtime is unavailable, or the device is not usable.
+    crate::analysis::ensure_initialized().map_err(|e| {
+        anyhow::anyhow!(
+            "aligner = simple_cuda was requested but CUDA is not usable: {}\n\
+             Possible causes: no NVIDIA GPU on this system, missing CUDA runtime DLL/SO, \
+             or driver too old for this CUDA build.\n\
+             Use --aligner simple_simd (CPU SIMD) or --aligner simple as an alternative.",
+            e
+        )
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn ensure_cuda_supported() -> Result<()> {
+    bail!(
+        "aligner = simple_cuda was not compiled into this binary.\n\
+         Rebuild with `cargo build --release --features cuda`, or use \
+         --aligner simple_simd / --aligner simple / --aligner pairwise."
+    )
 }
 
 fn parse_optional_u32(value: &str, flag_name: &str) -> Result<Option<u32>> {

@@ -7,6 +7,8 @@
 #![allow(dead_code)]
 
 mod analyzer;
+#[cfg(feature = "cuda")]
+mod cuda_align;
 mod fasta;
 mod iupac;
 mod pairwise;
@@ -30,3 +32,6 @@ pub use pairwise::*;
 pub use simple_align::*;
 #[allow(unused_imports)]
 pub use simd_align::*;
+#[cfg(feature = "cuda")]
+#[allow(unused_imports)]
+pub use cuda_align::*;

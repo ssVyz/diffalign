@@ -24,6 +24,38 @@ The binary lands at `target/release/diffalign` (or `diffalign.exe` on
 Windows). Place it wherever you like; on first run it will look for its
 config file alongside itself.
 
+### Optional: CUDA backend
+
+The GPU aligner (`--aligner simple_cuda`) is gated behind a Cargo feature.
+To build with it enabled:
+
+```
+cargo build --release --features cuda
+```
+
+Build requirements (on top of Rust):
+
+- NVIDIA CUDA Toolkit (tested with 13.2; minimum supported GPU is Turing /
+  sm_75 on CUDA 13.x). The toolkit is found via `CUDA_PATH`, falling back to
+  the standard install location on Windows.
+- A C++ host compiler that `nvcc` recognizes — on Windows that's MSVC
+  (Visual Studio Build Tools or full Visual Studio), located automatically
+  via the `cc` crate.
+
+Runtime requirements when actually using `--aligner simple_cuda`:
+
+- An NVIDIA GPU of supported compute capability (sm_75 / Turing or newer).
+- The CUDA runtime library (`cudart64_*.dll` on Windows, `libcudart.so` on
+  Linux) on the system search path.
+
+The compiled binary still works on systems without a GPU — only
+`--aligner simple_cuda` requires the runtime. The other aligners run
+normally and the program errors out cleanly with a helpful message if the
+GPU backend is selected but unusable.
+
+A plain `cargo build --release` (no `--features cuda`) produces a smaller
+binary with no CUDA runtime dependency at all.
+
 ---
 
 ## Quick start
@@ -85,13 +117,14 @@ it.
 
 ### Aligner backend
 
-| Flag                                      | Default    | Description                                                                                  |
-|-------------------------------------------|------------|----------------------------------------------------------------------------------------------|
-| `-a, --aligner pairwise\|simple\|simple_simd` | `pairwise` | Pick the alignment backend. See [How it works](#how-it-works) for what each does.            |
+| Flag                                                         | Default    | Description                                                                                  |
+|--------------------------------------------------------------|------------|----------------------------------------------------------------------------------------------|
+| `-a, --aligner pairwise\|simple\|simple_simd\|simple_cuda`   | `pairwise` | Pick the alignment backend. See [How it works](#how-it-works) for what each does.            |
 
 - `pairwise` — rust-bio Smith-Waterman local alignment. Forward strand only. No oligo-length limit.
 - `simple` — bitap (substitutions-only). Forward **and** reverse-complement strands; when the best hit is on the reverse strand the matched fragment is reverse-complemented before being grouped, so downstream variant analysis sees a consistent orientation. Oligo length **must be ≤ 64 bp**.
 - `simple_simd` — same algorithm as `simple`, but the inner reference loop is AVX2-vectorized across 4 references per CPU core. Output is bit-identical to `simple` on the same inputs. Requires AVX2: the program detects the CPU at startup and aborts with a message pointing at `--aligner simple` if AVX2 is unavailable. On non-x86_64 builds, the kind is rejected at the same point.
+- `simple_cuda` — same algorithm as `simple`, but the per-reference scan runs on an NVIDIA GPU with one CUDA thread per reference. Output is bit-identical to `simple` on the same inputs. Only available in builds compiled with `--features cuda`; restricted to `--method none` (no-ambiguities variant search). Caps `max_mismatches` at 16. Requires a CUDA-capable GPU and the CUDA runtime at startup; the program errors out cleanly if either is missing.
 
 ### Pairwise alignment (only used when `--aligner pairwise`)
 
@@ -180,13 +213,17 @@ coverage_threshold = 90.0
 var_limit =
 
 [aligner]
-; Which alignment backend to use: pairwise | simple | simple_simd
+; Which alignment backend to use: pairwise | simple | simple_simd | simple_cuda
 ;   pairwise    = rust-bio Smith-Waterman local alignment
 ;   simple      = bitap (substitutions-only). Max oligo length is 64 bp;
 ;                 scans both forward and reverse-complement strands.
 ;   simple_simd = same algorithm as simple, AVX2-vectorized across references.
 ;                 Requires a CPU with AVX2; the program errors out at startup
 ;                 if AVX2 is not detected. Output is bit-identical to simple.
+;   simple_cuda = same algorithm as simple, GPU-accelerated. Only available
+;                 in builds compiled with --features cuda and only when
+;                 method = none. Requires an NVIDIA GPU + CUDA runtime;
+;                 caps max_mismatches at 16. Output is bit-identical to simple.
 kind = pairwise
 
 [pairwise]
@@ -255,6 +292,18 @@ Three backends are available, selected via `--aligner`:
   a regression test in `screener.rs`). The program checks for AVX2 at startup
   and aborts with a clear message if the CPU does not advertise it; on
   non-x86_64 build targets the kind is rejected up front.
+
+- **`simple_cuda`** — algorithm-identical to `simple`, runs on an NVIDIA GPU
+  with one CUDA thread per reference. References are uploaded to the GPU
+  once at run start; per-window kernel launches reuse the same on-device
+  buffers. Output is bit-identical to `simple` on the same inputs (regression
+  test in `screener.rs`, gated on `cuda` feature + a usable GPU). Only
+  available in builds compiled with `--features cuda` (see
+  [Building](#building)); the variant-finding method is restricted to `none`
+  and `max_mismatches` is capped at 16. The program checks for a usable
+  CUDA device at startup and refuses to run with a clear error if the
+  runtime, driver, or GPU is missing; the other aligners are unaffected on
+  systems without CUDA.
 
 Mismatch-count parity between `pairwise` and the bitap backends is documented
 but not exact in edge cases involving IUPAC codes, `N`, or `-` in references:
@@ -344,6 +393,20 @@ diffalign target.fasta refs.fasta -a simple_simd -o results.json
 Runs the bitap backend with AVX2 vectorization across references. Requires a
 CPU with AVX2; aborts at startup with an error if not available. Output is
 bit-identical to `-a simple`. Oligo length must be ≤ 64 bp.
+
+### Bitap on GPU (largest reference sets)
+
+```
+diffalign target.fasta refs.fasta -a simple_cuda -o results.json
+```
+
+Runs the bitap backend on an NVIDIA GPU with one CUDA thread per reference.
+Only available when the binary was built with `cargo build --release
+--features cuda`. Restricted to `--method none`; aborts at startup with an
+error if a usable GPU + CUDA runtime is not available, or if combined with
+an unsupported method. Output is bit-identical to `-a simple`. Oligo length
+must be ≤ 64 bp; `max_mismatches` must be ≤ 16. Differential mode
+(`-d offtargets.fasta`) works the same way as with the other aligners.
 
 ### Length sweep with skip and incremental method
 

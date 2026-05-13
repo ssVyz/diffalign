@@ -97,13 +97,18 @@ impl Default for SimpleParams {
 ///
 /// `snake_case` rename is identical to `lowercase` for the single-word variants
 /// (`Pairwise`, `Simple`) so legacy JSON files continue to round-trip; it only
-/// affects `SimpleSimd`, which becomes `"simple_simd"`.
+/// affects `SimpleSimd` → `"simple_simd"` and `SimpleCuda` → `"simple_cuda"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlignerKind {
     Pairwise,
     Simple,
     SimpleSimd,
+    /// GPU bitap. Only present in builds compiled with the `cuda` feature;
+    /// kept as a serde-recognized variant on all builds so JSON files that
+    /// mention `simple_cuda` still parse (the CLI rejects it at startup on
+    /// non-cuda builds).
+    SimpleCuda,
 }
 
 impl Default for AlignerKind {
@@ -118,9 +123,9 @@ impl AlignerKind {
     }
 
     /// True if this kind uses the bitap (simplescreen) algorithm under the
-    /// hood (whether scalar or SIMD-vectorized).
+    /// hood (whether scalar, SIMD-vectorized, or GPU-accelerated).
     pub fn is_bitap(&self) -> bool {
-        matches!(self, Self::Simple | Self::SimpleSimd)
+        matches!(self, Self::Simple | Self::SimpleSimd | Self::SimpleCuda)
     }
 }
 

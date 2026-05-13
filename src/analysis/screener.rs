@@ -10,6 +10,11 @@ use std::sync::mpsc::Sender;
 use rayon::prelude::*;
 
 use super::analyzer::analyze_sequences;
+#[cfg(feature = "cuda")]
+use super::cuda_align::{
+    CudaAligner, collect_matches_with_cuda_aligner,
+    collect_mismatch_counts_with_cuda_aligner, create_cuda_aligner,
+};
 use super::fasta::{ReferenceData, TemplateData};
 use super::pairwise::{
     DnaAligner, collect_matches_with_aligner, collect_mismatch_counts_with_aligner, create_aligner,
@@ -33,6 +38,8 @@ enum WorkerAligner {
     Pairwise(DnaAligner),
     Simple(SimpleAligner),
     SimpleSimd(SimdAligner),
+    #[cfg(feature = "cuda")]
+    SimpleCuda(CudaAligner),
 }
 
 /// Build the list of oligo lengths to process given min, max, and skip.
@@ -86,6 +93,25 @@ pub fn run_screening(
         Arc::new(e.sequences.iter().map(|s| s.as_bytes().to_vec()).collect())
     });
     let excl_names: Option<Arc<Vec<String>>> = exclusivity.map(|e| Arc::new(e.names.clone()));
+
+    // If the GPU backend is selected, upload the reference sets once before
+    // the per-position loop. Slot 0 is the main set; slot 1 is the exclusivity
+    // set when differential mode is enabled. Per-position dispatches identify
+    // their slot by slice pointer + length, so the same `Arc<Vec<Vec<u8>>>`
+    // must be the one handed to each worker — the rest of this function
+    // already does that.
+    #[cfg(feature = "cuda")]
+    if params.aligner == AlignerKind::SimpleCuda {
+        use super::cuda_align::{ensure_initialized, register_slot};
+        ensure_initialized()
+            .unwrap_or_else(|e| panic!("CUDA backend init failed: {}", e));
+        register_slot(0, &ref_bytes)
+            .unwrap_or_else(|e| panic!("CUDA: failed to upload reference set: {}", e));
+        if let Some(eb) = excl_bytes.as_ref() {
+            register_slot(1, eb)
+                .unwrap_or_else(|e| panic!("CUDA: failed to upload exclusivity set: {}", e));
+        }
+    }
 
     let lengths = build_length_list(
         params.min_oligo_length,
@@ -163,6 +189,18 @@ fn analyze_length(
                 }
                 AlignerKind::SimpleSimd => {
                     WorkerAligner::SimpleSimd(create_simd_aligner(&simple_params))
+                }
+                #[cfg(feature = "cuda")]
+                AlignerKind::SimpleCuda => {
+                    WorkerAligner::SimpleCuda(create_cuda_aligner(&simple_params))
+                }
+                #[cfg(not(feature = "cuda"))]
+                AlignerKind::SimpleCuda => {
+                    panic!(
+                        "aligner = simple_cuda was selected but this build was \
+                         compiled without the `cuda` feature — rebuild with \
+                         `cargo build --features cuda`"
+                    );
                 }
             },
             |aligner, &position| {
@@ -250,6 +288,11 @@ fn analyze_window(
         WorkerAligner::SimpleSimd(a) => {
             let sp = params.simple.unwrap_or_default();
             collect_matches_with_simd_aligner(a, oligo, ref_bytes, &sp)
+        }
+        #[cfg(feature = "cuda")]
+        WorkerAligner::SimpleCuda(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_matches_with_cuda_aligner(a, oligo, ref_bytes, &sp)
         }
     };
 
@@ -342,6 +385,11 @@ fn analyze_exclusivity(
         WorkerAligner::SimpleSimd(a) => {
             let sp = params.simple.unwrap_or_default();
             collect_mismatch_counts_with_simd_aligner(a, oligo, excl_bytes, &sp)
+        }
+        #[cfg(feature = "cuda")]
+        WorkerAligner::SimpleCuda(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_mismatch_counts_with_cuda_aligner(a, oligo, excl_bytes, &sp)
         }
     };
 
@@ -695,6 +743,148 @@ mod tests {
                 }
             }
             panic!("simple_simd diverged from simple");
+        }
+    }
+
+    /// Bit-identical equivalence between the scalar bitap (`simple`) and the
+    /// CUDA bitap (`simple_cuda`) on a fixture that exercises full SIMD/CUDA
+    /// batches, ragged-length tails, forward + reverse-complement matches,
+    /// and exclusivity scanning. Mirrors `simple_simd_matches_simple_on_screening_results`.
+    ///
+    /// Skips if no CUDA-capable GPU is available (build env can compile the
+    /// feature without a runtime GPU).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn simple_cuda_matches_simple_on_screening_results() {
+        use crate::analysis::cuda_align::ensure_initialized;
+        use crate::analysis::types::{AlignerKind, SimpleParams};
+
+        if ensure_initialized().is_err() {
+            eprintln!("skipping simple_cuda equivalence test: no usable CUDA device");
+            return;
+        }
+
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATGTTCTAGAAATGGGCTGTACGTACGTACGTACGTACGTACGT".to_string(),
+        };
+        let references = ReferenceData {
+            names: (0..11).map(|i| format!("R{}", i)).collect(),
+            sequences: vec![
+                "TATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "AATATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "TATGGTTCGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "GTATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "NNNNACGTACCATANNNNNNNNNNNNNNNNNN".to_string(),
+                "GGGGGGGGGGGG".to_string(),
+                "TATGGTACGTCATG".to_string(),
+                "NNNNNNNN".to_string(),
+                "TATGGTACGGCATGTTCT".to_string(),
+                "TATGGTACGT".to_string(),
+                "TATGGTACATCATG".to_string(),
+            ],
+        };
+        let exclusivity = ReferenceData {
+            names: (0..6).map(|i| format!("E{}", i)).collect(),
+            sequences: vec![
+                "TATGGTACGTCATG".to_string(),
+                "AAAAAAAAAAAAAA".to_string(),
+                "TATGGTTCGTCATG".to_string(),
+                "NNNNACGTACCATANNNN".to_string(),
+                "GG".to_string(),
+                "TATGGTACATCATG".to_string(),
+            ],
+        };
+
+        let mut params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 2 }),
+            min_oligo_length: 10,
+            max_oligo_length: 14,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            ..Default::default()
+        };
+
+        let simple_results = run_screening(
+            &template,
+            &references,
+            &params,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        params.aligner = AlignerKind::SimpleCuda;
+        let cuda_results = run_screening(
+            &template,
+            &references,
+            &params,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        // Same normalization as the SIMD equivalence test.
+        fn normalize(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    map.remove("aligner");
+                    for (k, child) in map.iter_mut() {
+                        if k == "variants" {
+                            if let Some(arr) = child.as_array_mut() {
+                                arr.sort_by(|a, b| {
+                                    let ca = a.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+                                    let cb = b.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+                                    cb.cmp(&ca).then_with(|| {
+                                        let sa = a
+                                            .get("sequence")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        let sb = b
+                                            .get("sequence")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        sa.cmp(sb)
+                                    })
+                                });
+                            }
+                        }
+                        normalize(child);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for child in arr.iter_mut() {
+                        normalize(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut lhs = serde_json::to_value(&simple_results).unwrap();
+        let mut rhs = serde_json::to_value(&cuda_results).unwrap();
+        normalize(&mut lhs);
+        normalize(&mut rhs);
+        if lhs != rhs {
+            let lhs_s = serde_json::to_string_pretty(&lhs).unwrap();
+            let rhs_s = serde_json::to_string_pretty(&rhs).unwrap();
+            let lhs_lines: Vec<&str> = lhs_s.lines().collect();
+            let rhs_lines: Vec<&str> = rhs_s.lines().collect();
+            for (i, (l, r)) in lhs_lines.iter().zip(rhs_lines.iter()).enumerate() {
+                if l != r {
+                    let lo = i.saturating_sub(3);
+                    let hi = (i + 4).min(lhs_lines.len()).min(rhs_lines.len());
+                    eprintln!("first diff context (lines {}..{}):", lo + 1, hi);
+                    for j in lo..hi {
+                        let mark = if j == i { ">>" } else { "  " };
+                        eprintln!("{} L{:>3}: simple      | {}", mark, j + 1, lhs_lines[j]);
+                        eprintln!("{} L{:>3}: simple_cuda | {}", mark, j + 1, rhs_lines[j]);
+                    }
+                    break;
+                }
+            }
+            panic!("simple_cuda diverged from simple");
         }
     }
 }

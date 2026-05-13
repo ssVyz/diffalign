@@ -3,6 +3,7 @@ name = "diffalign"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77.2"
+build = "build.rs"
 
 [lib]
 name = "diffalign"
@@ -11,6 +12,15 @@ path = "src/lib.rs"
 [[bin]]
 name = "diffalign"
 path = "src/main.rs"
+
+[features]
+default = []
+# Enables the GPU bitap aligner (`--aligner simple_cuda`). Requires the NVIDIA
+# CUDA Toolkit and a C++ host compiler at build time; the resulting binary
+# requires a CUDA-capable GPU and the CUDA runtime DLL/SO at run time, but
+# only if the user actually selects `--aligner simple_cuda`. All other
+# aligners continue to work without a GPU.
+cuda = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -24,6 +34,9 @@ indicatif = "0.17"
 rust-ini = "0.21"
 anyhow = "1"
 crossterm = "0.27"
+
+[build-dependencies]
+cc = "1.0"
 
 [profile.release]
 lto = "thin"

@@ -98,7 +98,7 @@ coverage_threshold = 90.0
 var_limit =
 
 [aligner]
-; Which alignment backend to use: pairwise | simple | simple_simd
+; Which alignment backend to use: pairwise | simple | simple_simd | simple_cuda
 ;   pairwise    = rust-bio Smith-Waterman local alignment (gaps allowed by score,
 ;                 gapped/partial-coverage alignments are still rejected at the
 ;                 accept layer)
@@ -107,6 +107,11 @@ var_limit =
 ;   simple_simd = same algorithm as simple, AVX2-vectorized across references.
 ;                 Requires a CPU with AVX2; the program errors out at startup
 ;                 if AVX2 is not detected. Output is bit-identical to simple.
+;   simple_cuda = same algorithm as simple, GPU-accelerated across references.
+;                 Only available in builds compiled with the `cuda` feature and
+;                 only when method = none. Requires an NVIDIA GPU + CUDA runtime
+;                 at startup; the program errors out otherwise. Output is
+;                 bit-identical to simple.
 kind = pairwise
 
 [pairwise]
@@ -215,8 +220,9 @@ pub fn parse_aligner_kind(name: &str) -> Result<AlignerKind> {
         "pairwise" | "pw" | "rustbio" => Ok(AlignerKind::Pairwise),
         "simple" | "simplescreen" | "bitap" => Ok(AlignerKind::Simple),
         "simple_simd" | "simd" | "simplesimd" => Ok(AlignerKind::SimpleSimd),
+        "simple_cuda" | "cuda" | "gpu" | "simplecuda" => Ok(AlignerKind::SimpleCuda),
         other => bail!(
-            "unknown aligner kind '{}' (expected: pairwise | simple | simple_simd)",
+            "unknown aligner kind '{}' (expected: pairwise | simple | simple_simd | simple_cuda)",
             other
         ),
     }
