@@ -67,8 +67,8 @@ pub struct Cli {
     // ── aligner backend ───────────────────────────────────────────────
     /// Alignment backend: pairwise (Smith-Waterman) | simple (bitap, ≤64 bp) |
     /// simple_simd (AVX2-vectorized bitap; requires CPU AVX2 support) |
-    /// simple_cuda (GPU bitap; requires NVIDIA GPU + CUDA runtime; restricted
-    /// to --method none).
+    /// simple_cuda (GPU bitap; requires NVIDIA GPU + CUDA runtime; caps
+    /// max_mismatches at 16).
     #[arg(
         short = 'a',
         long = "aligner",
@@ -245,15 +245,10 @@ impl Cli {
 
         if aligner == AlignerKind::SimpleCuda {
             ensure_cuda_supported()?;
-            // CUDA backend is restricted to NoAmbiguities variant search.
-            if !matches!(method, AnalysisMethod::NoAmbiguities) {
-                bail!(
-                    "aligner = simple_cuda only supports --method none (no ambiguities).\n\
-                     Got --method {}. Either switch the variant method to `none`, or pick a \
-                     non-CUDA aligner.",
-                    method_name(&method),
-                );
-            }
+            // The CUDA backend only performs the alignment stage; the variant
+            // method runs on the matched fragments afterwards on the CPU, so
+            // every `--method` works here exactly as it does for `simple`.
+            // The one real GPU constraint is the kernel's `max_mismatches` cap.
             if simple.max_mismatches > CUDA_MAX_K {
                 bail!(
                     "aligner = simple_cuda caps max_mismatches at {} (got {}).\n\
@@ -342,14 +337,6 @@ fn aligner_name(k: AlignerKind) -> &'static str {
         AlignerKind::Simple => "simple",
         AlignerKind::SimpleSimd => "simple_simd",
         AlignerKind::SimpleCuda => "simple_cuda",
-    }
-}
-
-fn method_name(m: &AnalysisMethod) -> &'static str {
-    match m {
-        AnalysisMethod::NoAmbiguities => "none",
-        AnalysisMethod::FixedAmbiguities(_) => "fixed",
-        AnalysisMethod::Incremental(_, _) => "incremental",
     }
 }
 

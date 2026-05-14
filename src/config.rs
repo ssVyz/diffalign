@@ -108,10 +108,10 @@ var_limit =
 ;                 Requires a CPU with AVX2; the program errors out at startup
 ;                 if AVX2 is not detected. Output is bit-identical to simple.
 ;   simple_cuda = same algorithm as simple, GPU-accelerated across references.
-;                 Only available in builds compiled with the `cuda` feature and
-;                 only when method = none. Requires an NVIDIA GPU + CUDA runtime
-;                 at startup; the program errors out otherwise. Output is
-;                 bit-identical to simple.
+;                 Only available in builds compiled with the `cuda` feature.
+;                 Works with every method; caps max_mismatches at 16. Requires
+;                 an NVIDIA GPU + CUDA runtime at startup; the program errors
+;                 out otherwise. Output is bit-identical to simple.
 kind = pairwise
 
 [pairwise]

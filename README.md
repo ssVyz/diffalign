@@ -124,7 +124,7 @@ it.
 - `pairwise` — rust-bio Smith-Waterman local alignment. Forward strand only. No oligo-length limit.
 - `simple` — bitap (substitutions-only). Forward **and** reverse-complement strands; when the best hit is on the reverse strand the matched fragment is reverse-complemented before being grouped, so downstream variant analysis sees a consistent orientation. Oligo length **must be ≤ 64 bp**.
 - `simple_simd` — same algorithm as `simple`, but the inner reference loop is AVX2-vectorized across 4 references per CPU core. Output is bit-identical to `simple` on the same inputs. Requires AVX2: the program detects the CPU at startup and aborts with a message pointing at `--aligner simple` if AVX2 is unavailable. On non-x86_64 builds, the kind is rejected at the same point.
-- `simple_cuda` — same algorithm as `simple`, but the per-reference scan runs on an NVIDIA GPU with one CUDA thread per reference. Output is bit-identical to `simple` on the same inputs. Only available in builds compiled with `--features cuda`; restricted to `--method none` (no-ambiguities variant search). Caps `max_mismatches` at 16. Requires a CUDA-capable GPU and the CUDA runtime at startup; the program errors out cleanly if either is missing.
+- `simple_cuda` — same algorithm as `simple`, but the per-reference scan runs on an NVIDIA GPU with one CUDA thread per reference. Output is bit-identical to `simple` on the same inputs, and works with every `--method` (the GPU only does the alignment stage; variant analysis runs on the CPU afterwards). Only available in builds compiled with `--features cuda`. Caps `max_mismatches` at 16. Requires a CUDA-capable GPU and the CUDA runtime at startup; the program errors out cleanly if either is missing.
 
 ### Pairwise alignment (only used when `--aligner pairwise`)
 
@@ -221,8 +221,8 @@ var_limit =
 ;                 Requires a CPU with AVX2; the program errors out at startup
 ;                 if AVX2 is not detected. Output is bit-identical to simple.
 ;   simple_cuda = same algorithm as simple, GPU-accelerated. Only available
-;                 in builds compiled with --features cuda and only when
-;                 method = none. Requires an NVIDIA GPU + CUDA runtime;
+;                 in builds compiled with --features cuda. Works with every
+;                 method. Requires an NVIDIA GPU + CUDA runtime;
 ;                 caps max_mismatches at 16. Output is bit-identical to simple.
 kind = pairwise
 
@@ -299,9 +299,10 @@ Three backends are available, selected via `--aligner`:
   buffers. Output is bit-identical to `simple` on the same inputs (regression
   test in `screener.rs`, gated on `cuda` feature + a usable GPU). Only
   available in builds compiled with `--features cuda` (see
-  [Building](#building)); the variant-finding method is restricted to `none`
-  and `max_mismatches` is capped at 16. The program checks for a usable
-  CUDA device at startup and refuses to run with a clear error if the
+  [Building](#building)). The GPU performs only the alignment stage, so every
+  variant-finding method works as it does for `simple`; `max_mismatches` is
+  capped at 16 (a kernel register-pressure limit). The program checks for a
+  usable CUDA device at startup and refuses to run with a clear error if the
   runtime, driver, or GPU is missing; the other aligners are unaffected on
   systems without CUDA.
 

@@ -751,6 +751,17 @@ mod tests {
     /// batches, ragged-length tails, forward + reverse-complement matches,
     /// and exclusivity scanning. Mirrors `simple_simd_matches_simple_on_screening_results`.
     ///
+    /// Uses `--method none` only — and that is *sufficient* to cover every
+    /// method. The aligner backend is responsible solely for the alignment
+    /// stage (`collect_matches_with_*` / `collect_mismatch_counts_with_*`);
+    /// `none` compares that stage's output directly. The downstream variant
+    /// analysis (`analyze_sequences`) is backend-agnostic — it consumes the
+    /// matched fragments and never sees the aligner — so once the fragments
+    /// match, `fixed` and `incremental` follow by construction. They can't be
+    /// diff-tested across backends anyway: `find_*_consensus` iterates
+    /// `HashMap`/`HashSet` with per-instance random seeds, so its output is
+    /// nondeterministic run-to-run even for `simple` vs. `simple`.
+    ///
     /// Skips if no CUDA-capable GPU is available (build env can compile the
     /// feature without a runtime GPU).
     #[cfg(feature = "cuda")]
