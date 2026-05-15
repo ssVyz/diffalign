@@ -10,6 +10,7 @@ pub fn analyze_sequences(
     method: &AnalysisMethod,
     exclude_n: bool,
     coverage_threshold: f64,
+    max_seeds: usize,
 ) -> WindowAnalysisResult {
     if sequences.is_empty() {
         return WindowAnalysisResult {
@@ -24,13 +25,14 @@ pub fn analyze_sequences(
     let variants = match method {
         AnalysisMethod::NoAmbiguities => find_variants_no_ambiguities(sequences),
         AnalysisMethod::FixedAmbiguities(max_amb) => {
-            find_minimum_variants_greedy(sequences, *max_amb as usize, exclude_n)
+            find_minimum_variants_greedy(sequences, *max_amb as usize, exclude_n, max_seeds)
         }
         AnalysisMethod::Incremental(target_pct, max_amb) => find_incremental_variants(
             sequences,
             *target_pct as f64,
             exclude_n,
             max_amb.map(|n| n as usize),
+            max_seeds,
         ),
     };
 
@@ -77,6 +79,7 @@ fn find_minimum_variants_greedy(
     sequences: &[&str],
     max_ambiguities: usize,
     exclude_n: bool,
+    max_seeds: usize,
 ) -> Vec<Variant> {
     if sequences.is_empty() {
         return Vec::new();
@@ -93,7 +96,7 @@ fn find_minimum_variants_greedy(
 
     while !uncovered.is_empty() {
         let (best_consensus, best_coverage) =
-            find_best_consensus(&uncovered, &seq_counts, max_ambiguities, exclude_n);
+            find_best_consensus(&uncovered, &seq_counts, max_ambiguities, exclude_n, max_seeds);
 
         if best_coverage.is_empty() {
             let most_freq = uncovered
@@ -139,6 +142,7 @@ fn find_best_consensus<'a>(
     seq_counts: &HashMap<&'a str, usize>,
     max_ambiguities: usize,
     exclude_n: bool,
+    max_seeds: usize,
 ) -> (String, HashSet<&'a str>) {
     let mut best_consensus = String::new();
     let mut best_coverage: HashSet<&str> = HashSet::new();
@@ -158,7 +162,7 @@ fn find_best_consensus<'a>(
 
     let mut group_mask: Vec<u8> = vec![0u8; seq_len];
 
-    for &seed_seq in uncovered_sorted.iter().take(50) {
+    for &seed_seq in uncovered_sorted.iter().take(max_seeds) {
         let seed_bytes = seed_seq.as_bytes();
         for pos in 0..seq_len {
             group_mask[pos] = base_to_bit(seed_bytes[pos]);
@@ -224,6 +228,7 @@ fn find_incremental_variants(
     target_percentage: f64,
     exclude_n: bool,
     max_ambiguities: Option<usize>,
+    max_seeds: usize,
 ) -> Vec<Variant> {
     if sequences.is_empty() {
         return Vec::new();
@@ -250,6 +255,7 @@ fn find_incremental_variants(
             target_count,
             exclude_n,
             max_ambiguities,
+            max_seeds,
         );
 
         let percentage = (best_coverage_count as f64 / total_original) * 100.0;
@@ -272,6 +278,7 @@ fn find_incremental_consensus(
     target_count: usize,
     exclude_n: bool,
     max_ambiguities: Option<usize>,
+    max_seeds: usize,
 ) -> (String, usize) {
     if unique_remaining.is_empty() {
         return (String::new(), 0);
@@ -298,7 +305,7 @@ fn find_incremental_consensus(
             break;
         }
 
-        for &seed_seq in sorted_remaining.iter().take(50) {
+        for &seed_seq in sorted_remaining.iter().take(max_seeds) {
             let seed_bytes = seed_seq.as_bytes();
             for pos in 0..seq_len {
                 group_mask[pos] = base_to_bit(seed_bytes[pos]);
@@ -431,7 +438,7 @@ mod tests {
     #[test]
     fn test_incremental_variants() {
         let seqs = vec!["ACGT", "ACGT", "ACGA", "ACGA", "ACGA", "TCGT", "TCGT"];
-        let variants = find_incremental_variants(&seqs, 50.0, false, Some(1));
+        let variants = find_incremental_variants(&seqs, 50.0, false, Some(1), 50);
         assert!(!variants.is_empty());
         let total_count: usize = variants.iter().map(|v| v.count).sum();
         assert_eq!(total_count, 7);
@@ -440,7 +447,7 @@ mod tests {
     #[test]
     fn test_fixed_ambiguities() {
         let seqs = vec!["ACGT", "ACGA"];
-        let variants = find_minimum_variants_greedy(&seqs, 1, false);
+        let variants = find_minimum_variants_greedy(&seqs, 1, false, 50);
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].count, 2);
     }

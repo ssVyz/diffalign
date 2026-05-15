@@ -314,6 +314,7 @@ fn analyze_window(
         &params.method,
         params.exclude_n,
         params.coverage_threshold,
+        params.max_seeds as usize,
     );
 
     result.total_sequences = total_refs;
@@ -757,10 +758,7 @@ mod tests {
     /// `none` compares that stage's output directly. The downstream variant
     /// analysis (`analyze_sequences`) is backend-agnostic — it consumes the
     /// matched fragments and never sees the aligner — so once the fragments
-    /// match, `fixed` and `incremental` follow by construction. They can't be
-    /// diff-tested across backends anyway: `find_*_consensus` iterates
-    /// `HashMap`/`HashSet` with per-instance random seeds, so its output is
-    /// nondeterministic run-to-run even for `simple` vs. `simple`.
+    /// match, `fixed` and `incremental` follow by construction.
     ///
     /// Skips if no CUDA-capable GPU is available (build env can compile the
     /// feature without a runtime GPU).

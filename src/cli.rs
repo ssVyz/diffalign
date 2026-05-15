@@ -120,6 +120,12 @@ pub struct Cli {
     #[arg(long = "var-limit", value_name = "N|none")]
     pub var_limit: Option<String>,
 
+    /// Number of seed sequences the ambiguity-aware variant finder tries
+    /// per greedy step (used with --method fixed or incremental).
+    /// Higher = better coverage at linear runtime cost. Must be >= 1.
+    #[arg(long = "max-seeds")]
+    pub max_seeds: Option<u32>,
+
     // ── threads ───────────────────────────────────────────────────────
     /// Percentage of available CPU cores to use (1-100).
     /// Resolved to a concrete core count (floor, min 1) at run time.
@@ -197,6 +203,10 @@ impl Cli {
             Some(s) => parse_optional_u32(s, "--var-limit")?.filter(|&n| n > 0),
             None => cfg.var_limit,
         };
+        let max_seeds = self.max_seeds.unwrap_or(cfg.max_seeds);
+        if max_seeds == 0 {
+            bail!("--max-seeds must be >= 1");
+        }
 
         if min_oligo_length == 0 {
             bail!("min_oligo_length must be >= 1");
@@ -287,6 +297,7 @@ impl Cli {
             thread_count,
             length_skip,
             var_limit,
+            max_seeds,
         })
     }
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use ini::Ini;
 
-use crate::analysis::{AlignerKind, AnalysisMethod, PairwiseParams, SimpleParams};
+use crate::analysis::{AlignerKind, AnalysisMethod, DEFAULT_MAX_SEEDS, PairwiseParams, SimpleParams};
 
 pub const INI_FILE_NAME: &str = "diffalign.ini";
 
@@ -33,6 +33,9 @@ pub struct Config {
     pub threads_percent: u32,
     /// Maximum variants recorded per position. `None` = unlimited.
     pub var_limit: Option<u32>,
+    /// Number of seed sequences the ambiguity-aware variant finder tries per
+    /// greedy step. Only used by `fixed` and `incremental` methods.
+    pub max_seeds: u32,
 }
 
 impl Default for Config {
@@ -50,6 +53,7 @@ impl Default for Config {
             coverage_threshold: 90.0,
             threads_percent: 100,
             var_limit: None,
+            max_seeds: DEFAULT_MAX_SEEDS,
         }
     }
 }
@@ -96,6 +100,12 @@ coverage_threshold = 90.0
 ; remaining variants' counts are folded into the no-match category
 ; for that position. Useful for keeping output JSON files manageable.
 var_limit =
+
+; Number of seed sequences the ambiguity-aware variant finder tries
+; per greedy step. Only used by methods `fixed` and `incremental`.
+; Higher values explore more starting points (better coverage) at
+; linear runtime cost; 50 is a good default. Must be >= 1.
+max_seeds = 50
 
 [aligner]
 ; Which alignment backend to use: pairwise | simple | simple_simd | simple_cuda
@@ -182,6 +192,7 @@ pub fn load(path: &Path) -> Result<Config> {
         get_f64(analysis, "coverage_threshold")?.unwrap_or(cfg.coverage_threshold);
     // var_limit: empty or 0 means unlimited.
     cfg.var_limit = get_optional_u32(analysis, "var_limit")?.filter(|&n| n > 0);
+    cfg.max_seeds = get_u32(analysis, "max_seeds")?.unwrap_or(cfg.max_seeds);
 
     // [aligner]
     let aligner = ini.section(Some("aligner"));
@@ -254,6 +265,9 @@ impl Config {
                 "threads percent must be between 1 and 100 (got {})",
                 self.threads_percent
             );
+        }
+        if self.max_seeds == 0 {
+            bail!("max_seeds must be >= 1");
         }
         Ok(())
     }

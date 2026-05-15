@@ -137,6 +137,16 @@ fn is_default_aligner(k: &AlignerKind) -> bool {
     k.is_default()
 }
 
+pub const DEFAULT_MAX_SEEDS: u32 = 50;
+
+fn default_max_seeds() -> u32 {
+    DEFAULT_MAX_SEEDS
+}
+
+fn is_default_max_seeds(n: &u32) -> bool {
+    *n == DEFAULT_MAX_SEEDS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisParams {
     pub method: AnalysisMethod,
@@ -168,6 +178,11 @@ pub struct AnalysisParams {
     /// counts are folded into the no-match category for that position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub var_limit: Option<u32>,
+    /// Number of seed sequences the ambiguity-aware variant finder tries per
+    /// greedy step. Higher = better coverage at linear cost; default 50. Only
+    /// used by `FixedAmbiguities` and `Incremental` methods.
+    #[serde(default = "default_max_seeds", skip_serializing_if = "is_default_max_seeds")]
+    pub max_seeds: u32,
 }
 
 impl Default for AnalysisParams {
@@ -185,6 +200,7 @@ impl Default for AnalysisParams {
             thread_count: ThreadCount::Auto,
             length_skip: 0,
             var_limit: None,
+            max_seeds: DEFAULT_MAX_SEEDS,
         }
     }
 }
