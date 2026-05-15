@@ -65,7 +65,11 @@ fn find_variants_no_ambiguities(sequences: &[&str]) -> Vec<Variant> {
         })
         .collect();
 
-    variants.sort_by(|a, b| b.count.cmp(&a.count));
+    variants.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.sequence.cmp(&b.sequence))
+    });
     variants
 }
 
@@ -94,8 +98,12 @@ fn find_minimum_variants_greedy(
         if best_coverage.is_empty() {
             let most_freq = uncovered
                 .iter()
-                .max_by_key(|&&s| seq_counts.get(s).unwrap_or(&0))
                 .copied()
+                .max_by(|a, b| {
+                    let ca = seq_counts.get(a).unwrap_or(&0);
+                    let cb = seq_counts.get(b).unwrap_or(&0);
+                    ca.cmp(cb).then_with(|| b.cmp(a))
+                })
                 .unwrap();
 
             let count = *seq_counts.get(most_freq).unwrap_or(&1);
@@ -137,7 +145,11 @@ fn find_best_consensus<'a>(
     let mut best_score = 0usize;
 
     let mut uncovered_sorted: Vec<_> = uncovered.iter().copied().collect();
-    uncovered_sorted.sort_by_key(|&s| std::cmp::Reverse(seq_counts.get(s).unwrap_or(&0)));
+    uncovered_sorted.sort_by(|a, b| {
+        let ca = seq_counts.get(a).unwrap_or(&0);
+        let cb = seq_counts.get(b).unwrap_or(&0);
+        cb.cmp(ca).then_with(|| a.cmp(b))
+    });
 
     let seq_len = uncovered_sorted.first().map(|s| s.len()).unwrap_or(0);
     if seq_len == 0 {
@@ -152,7 +164,7 @@ fn find_best_consensus<'a>(
             group_mask[pos] = base_to_bit(seed_bytes[pos]);
         }
 
-        for &other_seq in uncovered {
+        for &other_seq in &uncovered_sorted {
             if other_seq == seed_seq {
                 continue;
             }
@@ -274,13 +286,17 @@ fn find_incremental_consensus(
 
     let mut group_mask: Vec<u8> = vec![0u8; seq_len];
 
+    let mut sorted_remaining: Vec<_> = unique_remaining.to_vec();
+    sorted_remaining.sort_by(|a, b| {
+        let ca = remaining_counts.get(a).unwrap_or(&0);
+        let cb = remaining_counts.get(b).unwrap_or(&0);
+        cb.cmp(ca).then_with(|| a.cmp(b))
+    });
+
     for amb_level in 0..=max_amb_level {
         if found_target {
             break;
         }
-
-        let mut sorted_remaining: Vec<_> = unique_remaining.to_vec();
-        sorted_remaining.sort_by_key(|&s| std::cmp::Reverse(remaining_counts.get(s).unwrap_or(&0)));
 
         for &seed_seq in sorted_remaining.iter().take(50) {
             let seed_bytes = seed_seq.as_bytes();
@@ -288,7 +304,7 @@ fn find_incremental_consensus(
                 group_mask[pos] = base_to_bit(seed_bytes[pos]);
             }
 
-            for &other_seq in unique_remaining {
+            for &other_seq in &sorted_remaining {
                 if other_seq == seed_seq {
                     continue;
                 }
@@ -342,12 +358,8 @@ fn find_incremental_consensus(
         }
     }
 
-    if best_consensus.is_empty() && !unique_remaining.is_empty() {
-        let most_freq = unique_remaining
-            .iter()
-            .max_by_key(|&&s| remaining_counts.get(s).unwrap_or(&0))
-            .copied()
-            .unwrap();
+    if best_consensus.is_empty() && !sorted_remaining.is_empty() {
+        let most_freq = sorted_remaining[0];
         best_consensus = most_freq.to_string();
         best_coverage_count = *remaining_counts.get(most_freq).unwrap_or(&1);
     }
