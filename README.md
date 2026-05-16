@@ -146,6 +146,21 @@ it.
 | `--resolution N`           | `1`     | Position step within a length window. `2` = every other position.        |
 | `--coverage-threshold N`   | `90.0`  | Target cumulative variant coverage percentage (0-100).                   |
 
+### Anchored mode
+
+Opt-in mode that runs the per-position alignment once at a single anchor
+length and derives every other length's matched fragments from those stored
+positions, instead of re-running the search per length. Much faster on wide
+length ranges; the position bias of the anchor length carries through to
+every derived length.
+
+| Flag                  | Default                 | Description                                                       |
+|-----------------------|-------------------------|-------------------------------------------------------------------|
+| `--anchored`          | off                     | Enable anchored mode.                                             |
+| `--anchored-length N` | `--min-oligo-length`    | Length used for the anchor search. Must lie within `[min, max]`.  |
+
+See [Anchored mode](#anchored-mode-details) below for the semantics.
+
 ### Behavior
 
 | Flag                              | Description                                                                   |
@@ -211,6 +226,17 @@ coverage_threshold = 90.0
 ; no limit. When the limit is reached, the remaining variants' counts are
 ; folded into the no-match category for that position.
 var_limit =
+
+; Anchored mode: when true, the per-position search runs once at
+; `anchored_length`, and every length in the length range derives its
+; variants from those stored positions (instead of re-running the search
+; per length).
+anchored = false
+
+; Length used for the anchor search when anchored = true. Must lie within
+; [min_oligo_length, max_oligo_length]. Leave empty to fall back to
+; min_oligo_length.
+anchored_length =
 
 [aligner]
 ; Which alignment backend to use: pairwise | simple | simple_simd | simple_cuda
@@ -349,6 +375,51 @@ align (per the same gap/coverage/`max_mismatches` rules above) are bucketed
 under the sentinel `mismatches = 4294967295`. Lower mismatch counts indicate
 worse exclusivity (the oligo also matches off-target).
 
+### 5b. Anchored mode (optional, opt-in) <a id="anchored-mode-details"></a>
+
+By default, the per-position search runs once per oligo length, which is
+unbiased but scales linearly with the number of lengths in
+`[min_oligo_length, max_oligo_length]`. With `--anchored`, the search runs
+**once at `--anchored-length`** (default = `--min-oligo-length`), and the
+matched per-reference position from that single pass is reused to derive the
+length-`L` matched fragments for every length in the range.
+
+For an anchor matched at reference position `s` with anchor length `L_a`,
+the length-`L` fragment is extracted as follows:
+
+- **Forward orientation:** `reference[s..s+L]` — same 5'-start as the
+  anchor; right-extend for `L > L_a`, right-truncate for `L < L_a`.
+- **Reverse orientation:** `reverse_complement(reference[s+L_a-L..s+L_a])`
+  — the same convention, applied to the reverse strand and RC-flipped back
+  into oligo orientation.
+
+After extraction, the length-`L` fragment is re-checked against the template
+oligo `template[p..p+L]` using a base-by-base Hamming distance
+(case-insensitive ACGT; any other byte counts as a mismatch, matching the
+bitap convention). If the Hamming distance exceeds `max_mismatches`, the
+reference is no-match **for that length only** — the anchor itself, and
+other lengths that still fit, are unaffected. The same is true if the
+extension/truncation would run past the end of the reference.
+
+If no anchor was found for a given `(template_position, reference)` pair,
+the reference is no-match at **every** length for that position.
+
+The same logic governs the exclusivity (differential) pass under `-d`: the
+anchor is run once on the exclusivity set, and the mismatch histogram for
+each length is computed from the Hamming distances at the anchor's stored
+positions.
+
+Constraints: `anchored_length` must lie within
+`[min_oligo_length, max_oligo_length]`. Without an explicit value it
+defaults to `min_oligo_length`. The mode works with every `--aligner`
+backend and every `--method`.
+
+Trade-off: anchored mode trades flexibility for speed. The default mode
+re-searches per length and can find a different best position per length;
+anchored mode locks each reference's position to whatever the anchor
+length found. Use the default when bias matters; use anchored when you
+need a fast wide-length sweep.
+
 ### 6. Parallelism
 
 Within each oligo length, positions are processed in parallel via `rayon`,
@@ -408,6 +479,23 @@ error if a usable GPU + CUDA runtime is not available, or if combined with
 an unsupported method. Output is bit-identical to `-a simple`. Oligo length
 must be ≤ 64 bp; `max_mismatches` must be ≤ 16. Differential mode
 (`-d offtargets.fasta`) works the same way as with the other aligners.
+
+### Anchored mode: fast wide-length sweep
+
+```
+diffalign target.fasta refs.fasta -a simple_simd \
+  --min-oligo-length 18 --max-oligo-length 30 \
+  --anchored --anchored-length 18 \
+  -o results.json
+```
+
+Runs the per-position search once at length 18 and derives the matched
+fragments for lengths 19..30 from those stored positions, instead of
+re-running the search per length. `--anchored-length` defaults to
+`--min-oligo-length` and may be omitted (`--anchored` alone is enough).
+References whose extension would run past the reference end, or whose
+length-`L` fragment exceeds `max_mismatches` against the template, become
+no-match for *that length only*. Works with every aligner and method.
 
 ### Length sweep with skip and incremental method
 

@@ -3,7 +3,8 @@
 use bio::alignment::AlignmentOperation;
 use bio::alignment::pairwise::{Aligner, MatchFunc, MatchParams};
 
-use super::types::PairwiseParams;
+use super::simplescreen::screener::Orientation;
+use super::types::{AnchorHit, PairwiseParams};
 
 pub type DnaAligner = Aligner<MatchParams>;
 
@@ -25,6 +26,9 @@ pub struct PairwiseMatch {
     pub mismatches: usize,
     pub has_gaps: bool,
     pub full_coverage: bool,
+    /// 0-based start position of the matched window on the reference, when
+    /// `has_gaps == false && full_coverage == true`. Zero otherwise.
+    pub start: usize,
 }
 
 fn process_alignment<F: MatchFunc>(
@@ -61,6 +65,7 @@ fn process_alignment<F: MatchFunc>(
         mismatches,
         has_gaps,
         full_coverage,
+        start: alignment.ystart,
     }
 }
 
@@ -150,6 +155,36 @@ pub fn collect_matches_with_aligner(
     }
 
     (matched, no_match_count)
+}
+
+/// One alignment pass per reference; record the matched window's start
+/// position (along with mismatches and orientation) for every reference that
+/// passes the same accept criteria as `collect_matches_with_aligner`. Used by
+/// anchored mode.
+pub fn collect_anchors_with_aligner(
+    aligner: &mut DnaAligner,
+    oligo: &[u8],
+    references: &[Vec<u8>],
+    params: &PairwiseParams,
+) -> Vec<Option<AnchorHit>> {
+    references
+        .iter()
+        .map(|reference| {
+            let result = process_alignment(aligner, oligo, reference);
+            if !result.full_coverage
+                || result.has_gaps
+                || result.mismatches > params.max_mismatches as usize
+            {
+                None
+            } else {
+                Some(AnchorHit {
+                    start: result.start,
+                    orientation: Orientation::Forward,
+                    mismatches: result.mismatches as u32,
+                })
+            }
+        })
+        .collect()
 }
 
 pub fn collect_mismatch_counts_with_aligner(

@@ -12,24 +12,26 @@ use rayon::prelude::*;
 use super::analyzer::analyze_sequences;
 #[cfg(feature = "cuda")]
 use super::cuda_align::{
-    CudaAligner, collect_matches_with_cuda_aligner,
+    CudaAligner, collect_anchors_with_cuda_aligner, collect_matches_with_cuda_aligner,
     collect_mismatch_counts_with_cuda_aligner, create_cuda_aligner,
 };
 use super::fasta::{ReferenceData, TemplateData};
 use super::pairwise::{
-    DnaAligner, collect_matches_with_aligner, collect_mismatch_counts_with_aligner, create_aligner,
+    DnaAligner, collect_anchors_with_aligner, collect_matches_with_aligner,
+    collect_mismatch_counts_with_aligner, create_aligner,
 };
 use super::simd_align::{
-    SimdAligner, collect_matches_with_simd_aligner,
+    SimdAligner, collect_anchors_with_simd_aligner, collect_matches_with_simd_aligner,
     collect_mismatch_counts_with_simd_aligner, create_simd_aligner,
 };
 use super::simple_align::{
-    SimpleAligner, collect_matches_with_simple_aligner,
+    SimpleAligner, collect_anchors_with_simple_aligner, collect_matches_with_simple_aligner,
     collect_mismatch_counts_with_simple_aligner, create_simple_aligner,
 };
+use super::simplescreen::screener::Orientation;
 use super::types::{
-    AlignerKind, AnalysisParams, ExclusivityResult, LengthResult, MismatchBucket, PositionResult,
-    ProgressUpdate, ScreeningResults, WindowAnalysisResult,
+    AlignerKind, AnalysisParams, AnchorHit, ExclusivityResult, LengthResult, MismatchBucket,
+    PositionResult, ProgressUpdate, ScreeningResults, WindowAnalysisResult,
 };
 use crate::pause::PauseFlag;
 
@@ -119,6 +121,23 @@ pub fn run_screening(
         params.length_skip,
     );
     let total_lengths = lengths.len() as u32;
+
+    if params.anchored {
+        run_anchored_screening(
+            template,
+            &ref_bytes,
+            excl_bytes.as_ref().map(|v| v.as_ref().as_slice()),
+            excl_names.as_ref().map(|v| v.as_ref().as_slice()),
+            params,
+            &lengths,
+            total_lengths,
+            &pool,
+            &progress_tx,
+            pause.as_ref(),
+            &mut results,
+        );
+        return results;
+    }
 
     for (length_idx, oligo_length) in lengths.into_iter().enumerate() {
         let ref_bytes = Arc::clone(&ref_bytes);
@@ -296,6 +315,19 @@ fn analyze_window(
         }
     };
 
+    finalize_window(matched_sequences, no_match_count, total_refs, params)
+}
+
+/// Post-alignment processing shared between the default and anchored paths.
+/// Takes the matched fragments (oligo-oriented), the count of refs that didn't
+/// match, and the total ref count; produces the final `WindowAnalysisResult`
+/// after variant analysis and var_limit folding.
+fn finalize_window(
+    matched_sequences: Vec<String>,
+    no_match_count: usize,
+    total_refs: usize,
+    params: &AnalysisParams,
+) -> WindowAnalysisResult {
     if matched_sequences.is_empty() {
         return WindowAnalysisResult {
             total_sequences: total_refs,
@@ -394,6 +426,16 @@ fn analyze_exclusivity(
         }
     };
 
+    bucket_exclusivity(&mismatch_counts, excl_names)
+}
+
+/// Bin per-exclusivity-reference mismatch counts into the histogram used by
+/// `ExclusivityResult`. `None` entries are treated as no-match and routed to
+/// the `u32::MAX` bucket. Shared between the default and anchored paths.
+fn bucket_exclusivity(
+    mismatch_counts: &[Option<u32>],
+    excl_names: &[String],
+) -> ExclusivityResult {
     let mut buckets: std::collections::HashMap<u32, (usize, String)> =
         std::collections::HashMap::new();
     let mut no_match_count = 0usize;
@@ -439,10 +481,417 @@ fn analyze_exclusivity(
     }
 
     ExclusivityResult {
-        total_sequences: excl_bytes.len(),
+        total_sequences: mismatch_counts.len(),
         no_match_count,
         mismatch_histogram,
         min_mismatches,
+    }
+}
+
+// ───── anchored mode ──────────────────────────────────────────────────
+
+#[inline]
+fn complement_byte(b: u8) -> u8 {
+    match b {
+        b'A' => b'T',
+        b'T' | b'U' => b'A',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'a' => b't',
+        b't' | b'u' => b'a',
+        b'c' => b'g',
+        b'g' => b'c',
+        other => other,
+    }
+}
+
+fn reverse_complement_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes.iter().rev() {
+        out.push(complement_byte(b));
+    }
+    out
+}
+
+/// Hamming distance between two equal-length byte sequences using
+/// case-insensitive ACGT base equality. Anything that isn't a case-matching
+/// ACGT base counts as a mismatch (matches the bitap backends' convention:
+/// N / IUPAC / '-' in the reference all force a mismatch). Both inputs are
+/// expected to be the same length; if they differ, the difference adds to the
+/// mismatch count (defensive — shouldn't happen given upstream length checks).
+fn count_mismatches(a: &[u8], b: &[u8]) -> u32 {
+    let n = a.len().min(b.len());
+    let mut mm = (a.len().max(b.len()) - n) as u32;
+    for i in 0..n {
+        if a[i].to_ascii_uppercase() != b[i].to_ascii_uppercase() {
+            mm += 1;
+        }
+    }
+    mm
+}
+
+/// Extract the length-`L` fragment from `reference` given an anchor hit and
+/// the original anchor length. Returns the fragment in oligo orientation
+/// (forward as-is; reverse RC'd), or `None` if the extension/truncation runs
+/// past either end of the reference.
+///
+/// Invariant: the fragment always starts at the anchor's 5' position on the
+/// oligo's strand (right-extend for `L > anchor_length`, right-truncate for
+/// `L < anchor_length`).
+fn extract_anchored_fragment(
+    reference: &[u8],
+    anchor: &AnchorHit,
+    length: usize,
+    anchor_length: usize,
+) -> Option<Vec<u8>> {
+    let s = anchor.start;
+    let ref_len = reference.len();
+    match anchor.orientation {
+        Orientation::Forward => {
+            let end = s.checked_add(length)?;
+            if end > ref_len {
+                return None;
+            }
+            Some(reference[s..end].to_vec())
+        }
+        Orientation::Reverse => {
+            // The anchor occupies forward positions [s, s + anchor_length). On
+            // the oligo's strand this corresponds to the RC of those bases;
+            // the oligo's 5' end aligns to forward position `s + anchor_length
+            // - 1`. To right-extend on the oligo strand by (L - anchor_length)
+            // bases (or right-truncate for L < anchor_length), we shift the
+            // forward-strand 5' boundary leftward.
+            let anchor_end = s.checked_add(anchor_length)?;
+            if anchor_end > ref_len {
+                return None;
+            }
+            if length > anchor_end {
+                return None;
+            }
+            let start = anchor_end - length;
+            Some(reverse_complement_bytes(&reference[start..anchor_end]))
+        }
+    }
+}
+
+/// Construct a fresh `WorkerAligner` of the configured kind. Shared between
+/// the default per-length loop and the anchored mode's anchor pass.
+fn make_worker_aligner(
+    aligner_kind: AlignerKind,
+    oligo_len: usize,
+    max_seq_len: usize,
+    pw_params: &super::types::PairwiseParams,
+    simple_params: &super::types::SimpleParams,
+) -> WorkerAligner {
+    match aligner_kind {
+        AlignerKind::Pairwise => {
+            WorkerAligner::Pairwise(create_aligner(oligo_len, max_seq_len, pw_params))
+        }
+        AlignerKind::Simple => WorkerAligner::Simple(create_simple_aligner(simple_params)),
+        AlignerKind::SimpleSimd => WorkerAligner::SimpleSimd(create_simd_aligner(simple_params)),
+        #[cfg(feature = "cuda")]
+        AlignerKind::SimpleCuda => WorkerAligner::SimpleCuda(create_cuda_aligner(simple_params)),
+        #[cfg(not(feature = "cuda"))]
+        AlignerKind::SimpleCuda => panic!(
+            "aligner = simple_cuda was selected but this build was compiled \
+             without the `cuda` feature — rebuild with `cargo build --features cuda`"
+        ),
+    }
+}
+
+/// Effective `max_mismatches` for the configured aligner. Used by anchored
+/// mode to re-check the length-`L` fragment against the template oligo and
+/// reject if it exceeds the threshold (Q3 in the implementation doc).
+fn effective_max_mismatches(params: &AnalysisParams) -> u32 {
+    if params.aligner.is_bitap() {
+        params.simple.unwrap_or_default().max_mismatches
+    } else {
+        params.pairwise.max_mismatches
+    }
+}
+
+/// Per-(template-position) anchor record for one set of sequences.
+struct AnchorRow {
+    position: usize,
+    /// One entry per reference / exclusivity sequence, in input order.
+    hits: Vec<Option<AnchorHit>>,
+}
+
+fn run_anchored_screening(
+    template: &TemplateData,
+    ref_bytes: &[Vec<u8>],
+    excl_bytes: Option<&[Vec<u8>]>,
+    excl_names: Option<&[String]>,
+    params: &AnalysisParams,
+    lengths: &[u32],
+    total_lengths: u32,
+    pool: &rayon::ThreadPool,
+    progress_tx: &Option<Sender<ProgressUpdate>>,
+    pause: Option<&PauseFlag>,
+    results: &mut ScreeningResults,
+) {
+    let anchor_length =
+        params.anchored_length.unwrap_or(params.min_oligo_length) as usize;
+    let template_bytes = template.sequence.as_bytes();
+    let template_len = template_bytes.len();
+    if template_len < anchor_length {
+        // No anchor positions fit; every length will be empty too. Fill in
+        // empty LengthResults so the output shape stays consistent.
+        for &oligo_length in lengths {
+            results.results_by_length.insert(
+                oligo_length,
+                LengthResult {
+                    oligo_length,
+                    positions: Vec::new(),
+                },
+            );
+        }
+        return;
+    }
+
+    let resolution = params.resolution as usize;
+    let max_anchor_start = template_len - anchor_length;
+    let anchor_positions: Vec<usize> = (0..=max_anchor_start).step_by(resolution).collect();
+    let total_anchor_positions = anchor_positions.len();
+
+    let max_ref_len = ref_bytes.iter().map(|r| r.len()).max().unwrap_or(0);
+    let max_excl_len = excl_bytes
+        .map(|eb| eb.iter().map(|r| r.len()).max().unwrap_or(0))
+        .unwrap_or(0);
+    let max_seq_len = max_ref_len.max(max_excl_len);
+    let pw_params = params.pairwise;
+    let simple_params = params.simple.unwrap_or_default();
+    let aligner_kind = params.aligner;
+
+    // ── anchor pass ─────────────────────────────────────────────────
+    let anchor_completed = Arc::new(AtomicUsize::new(0));
+
+    // Build (anchor-position, ref-hits, excl-hits) rows in parallel.
+    type AnchorRowFull = (AnchorRow, Option<AnchorRow>);
+    let rows: Vec<AnchorRowFull> = pool.install(|| {
+        anchor_positions
+            .par_iter()
+            .map_init(
+                move || {
+                    make_worker_aligner(
+                        aligner_kind,
+                        anchor_length,
+                        max_seq_len,
+                        &pw_params,
+                        &simple_params,
+                    )
+                },
+                |aligner, &p| {
+                    if let Some(pf) = pause {
+                        pf.wait_if_paused();
+                    }
+                    let oligo = &template_bytes[p..p + anchor_length];
+
+                    let ref_hits = collect_anchors_dispatch(aligner, oligo, ref_bytes, params);
+                    let excl_hits = excl_bytes.map(|eb| AnchorRow {
+                        position: p,
+                        hits: collect_anchors_dispatch(aligner, oligo, eb, params),
+                    });
+
+                    let completed =
+                        anchor_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(tx) = progress_tx {
+                        if completed % 10 == 0 || completed == total_anchor_positions {
+                            // `current_length: 0` is a sentinel that tells
+                            // the reporter "this is the anchor pass, don't
+                            // treat it like an oligo length" (every real
+                            // length is >= 1). Without that, the per-length
+                            // plan lookup matches the anchor length and the
+                            // length bar gets bumped one step too early.
+                            //
+                            // The message follows the same "Position N/M"
+                            // pattern the reporter parses for the default
+                            // path, so the position bar reflects the count
+                            // of completed positions rather than the index
+                            // of whichever worker finished last (positions
+                            // execute in parallel/random order).
+                            let _ = tx.send(ProgressUpdate {
+                                current_length: 0,
+                                current_position: p,
+                                total_positions: total_anchor_positions,
+                                lengths_completed: 0,
+                                total_lengths,
+                                message: format!(
+                                    "Anchor pass (L={}): Position {}/{}",
+                                    anchor_length, completed, total_anchor_positions
+                                ),
+                            });
+                        }
+                    }
+
+                    (
+                        AnchorRow {
+                            position: p,
+                            hits: ref_hits,
+                        },
+                        excl_hits,
+                    )
+                },
+            )
+            .collect()
+    });
+
+    // Sort by position so per-length derivation is in-order.
+    let mut rows = rows;
+    rows.sort_by_key(|(r, _)| r.position);
+
+    // ── per-length derivation ───────────────────────────────────────
+    let max_mismatches = effective_max_mismatches(params);
+    let total_refs = ref_bytes.len();
+
+    for (length_idx, &oligo_length) in lengths.iter().enumerate() {
+        let length = oligo_length as usize;
+        let length_completed = Arc::new(AtomicUsize::new(0));
+
+        // Filter rows where the template window of length `L` fits.
+        let usable: Vec<&AnchorRowFull> = rows
+            .iter()
+            .filter(|(r, _)| r.position + length <= template_len)
+            .collect();
+        let total_positions = usable.len();
+
+        let mut position_results: Vec<PositionResult> = pool.install(|| {
+            usable
+                .par_iter()
+                .map(|(ref_row, excl_row_opt)| {
+                    if let Some(pf) = pause {
+                        pf.wait_if_paused();
+                    }
+                    let position = ref_row.position;
+                    let oligo = &template_bytes[position..position + length];
+
+                    // References → matched fragments
+                    let mut matched: Vec<String> = Vec::new();
+                    let mut no_match_count = 0usize;
+                    for (i, anchor) in ref_row.hits.iter().enumerate() {
+                        match anchor {
+                            None => no_match_count += 1,
+                            Some(a) => {
+                                match extract_anchored_fragment(
+                                    &ref_bytes[i],
+                                    a,
+                                    length,
+                                    anchor_length,
+                                ) {
+                                    Some(frag) => {
+                                        if count_mismatches(&frag, oligo) > max_mismatches {
+                                            no_match_count += 1;
+                                        } else {
+                                            matched.push(
+                                                String::from_utf8_lossy(&frag).into_owned(),
+                                            );
+                                        }
+                                    }
+                                    None => no_match_count += 1,
+                                }
+                            }
+                        }
+                    }
+                    let analysis = finalize_window(matched, no_match_count, total_refs, params);
+
+                    // Exclusivity → mismatch histogram (Hamming vs template)
+                    let exclusivity = excl_row_opt.as_ref().map(|excl_row| {
+                        let names = excl_names.expect("excl_names must be set when exclusivity is");
+                        let eb = excl_bytes.expect("excl_bytes must be set when exclusivity is");
+                        let mut counts: Vec<Option<u32>> = Vec::with_capacity(excl_row.hits.len());
+                        for (i, anchor) in excl_row.hits.iter().enumerate() {
+                            match anchor {
+                                None => counts.push(None),
+                                Some(a) => {
+                                    match extract_anchored_fragment(
+                                        &eb[i],
+                                        a,
+                                        length,
+                                        anchor_length,
+                                    ) {
+                                        Some(frag) => {
+                                            let mm = count_mismatches(&frag, oligo);
+                                            if mm > max_mismatches {
+                                                counts.push(None);
+                                            } else {
+                                                counts.push(Some(mm));
+                                            }
+                                        }
+                                        None => counts.push(None),
+                                    }
+                                }
+                            }
+                        }
+                        bucket_exclusivity(&counts, names)
+                    });
+
+                    let completed = length_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(tx) = progress_tx {
+                        if completed % 10 == 0 || completed == total_positions {
+                            let _ = tx.send(ProgressUpdate {
+                                current_length: oligo_length,
+                                current_position: position,
+                                total_positions,
+                                lengths_completed: length_idx as u32,
+                                total_lengths,
+                                message: format!(
+                                    "Length {}/{}: Position {}/{}",
+                                    length_idx + 1,
+                                    total_lengths,
+                                    completed,
+                                    total_positions
+                                ),
+                            });
+                        }
+                    }
+
+                    PositionResult {
+                        position,
+                        variants_needed: analysis.variants_for_threshold,
+                        analysis,
+                        exclusivity,
+                    }
+                })
+                .collect()
+        });
+
+        position_results.sort_by_key(|r| r.position);
+
+        results.results_by_length.insert(
+            oligo_length,
+            LengthResult {
+                oligo_length,
+                positions: position_results,
+            },
+        );
+    }
+}
+
+/// Dispatch a single anchor-collection call to whichever backend is in use.
+/// Kept next to the anchored screening code so the call sites stay readable.
+fn collect_anchors_dispatch(
+    aligner: &mut WorkerAligner,
+    oligo: &[u8],
+    references: &[Vec<u8>],
+    params: &AnalysisParams,
+) -> Vec<Option<AnchorHit>> {
+    match aligner {
+        WorkerAligner::Pairwise(a) => {
+            collect_anchors_with_aligner(a, oligo, references, &params.pairwise)
+        }
+        WorkerAligner::Simple(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_anchors_with_simple_aligner(a, oligo, references, &sp)
+        }
+        WorkerAligner::SimpleSimd(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_anchors_with_simd_aligner(a, oligo, references, &sp)
+        }
+        #[cfg(feature = "cuda")]
+        WorkerAligner::SimpleCuda(a) => {
+            let sp = params.simple.unwrap_or_default();
+            collect_anchors_with_cuda_aligner(a, oligo, references, &sp)
+        }
     }
 }
 
@@ -895,5 +1344,333 @@ mod tests {
             }
             panic!("simple_cuda diverged from simple");
         }
+    }
+
+    // ───── anchored mode tests ────────────────────────────────────────
+
+    use crate::analysis::types::{AlignerKind, SimpleParams};
+
+    #[test]
+    fn count_mismatches_basic() {
+        assert_eq!(count_mismatches(b"ACGT", b"ACGT"), 0);
+        assert_eq!(count_mismatches(b"ACGT", b"ACGA"), 1);
+        // case fold
+        assert_eq!(count_mismatches(b"ACGT", b"acgt"), 0);
+        // N counts as mismatch (not equal to A/C/G/T)
+        assert_eq!(count_mismatches(b"ACGT", b"ACNT"), 1);
+    }
+
+    #[test]
+    fn extract_fragment_forward_extension_and_truncation() {
+        let reference = b"NNAAACCCGGGTTTNN".to_vec();
+        // anchor matches at start=2, anchor_length=6 → reference[2..8] = "AAACCC"
+        let anchor = AnchorHit {
+            start: 2,
+            orientation: Orientation::Forward,
+            mismatches: 0,
+        };
+
+        // Same length as anchor → identical
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 6, 6).unwrap(),
+            b"AAACCC".to_vec()
+        );
+        // Right-extend to 9 → reference[2..11] = "AAACCCGGG"
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 9, 6).unwrap(),
+            b"AAACCCGGG".to_vec()
+        );
+        // Right-truncate to 4 → reference[2..6] = "AAAC"
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 4, 6).unwrap(),
+            b"AAAC".to_vec()
+        );
+    }
+
+    #[test]
+    fn extract_fragment_forward_runs_off_end() {
+        let reference = b"NNAAACCC".to_vec(); // only 8 bytes
+        // anchor at start=4, anchor_length=4 → reference[4..8] = "ACCC"
+        let anchor = AnchorHit {
+            start: 4,
+            orientation: Orientation::Forward,
+            mismatches: 0,
+        };
+        // Right-extend to 5 needs reference[4..9] — out of bounds.
+        assert!(extract_anchored_fragment(&reference, &anchor, 5, 4).is_none());
+        // Same length still works.
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 4, 4).unwrap(),
+            b"ACCC".to_vec()
+        );
+    }
+
+    #[test]
+    fn extract_fragment_reverse_extends_leftward_on_forward_strand() {
+        // Oligo "ACGT" → RC "ACGT" (palindrome). Use "AAGT" → RC "ACTT".
+        // Place "ACTT" inside a reference; the bitap finds it on the reverse
+        // strand. After RC-ing back, we should get "AAGT".
+        let reference = b"NNNNACTTGCNN".to_vec();
+        let anchor = AnchorHit {
+            start: 4,
+            orientation: Orientation::Reverse,
+            mismatches: 0,
+        };
+        // Same length: RC of reference[4..8] = RC("ACTT") = "AAGT".
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 4, 4).unwrap(),
+            b"AAGT".to_vec()
+        );
+        // Extend to length 6 on the oligo's strand → we take 2 more bases
+        // to the LEFT on the forward strand (because forward[start..start+L]
+        // is the RC of oligo[…end…tail…]). Forward window = reference[2..8]
+        // = "NNACTT"; RC → "AAGTNN".
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 6, 4).unwrap(),
+            b"AAGTNN".to_vec()
+        );
+        // Truncate to length 2 → reference[6..8] = "TT"; RC → "AA".
+        assert_eq!(
+            extract_anchored_fragment(&reference, &anchor, 2, 4).unwrap(),
+            b"AA".to_vec()
+        );
+    }
+
+    /// When `anchored_length` equals both `min` and `max` and we run with the
+    /// simple aligner, anchored mode should produce the same results as the
+    /// default path for that one length: the anchor pass aligns the same
+    /// oligo against the same references, and the derived fragment for L =
+    /// L_anchor is the literal anchor match (forward or RC-normalized).
+    #[test]
+    fn anchored_matches_default_at_single_length() {
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+        };
+        let references = ReferenceData {
+            names: vec!["R1".into(), "R2".into(), "R3".into(), "R4".into()],
+            sequences: vec![
+                "TATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "AATATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "TATGGTTCGTCATGTTCTAGAAATGGGCTGT".to_string(),
+                "GTATGGTACGTCATGTTCTAGAAATGGGCTGT".to_string(),
+            ],
+        };
+
+        let base = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 2 }),
+            min_oligo_length: 12,
+            max_oligo_length: 12,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            ..Default::default()
+        };
+
+        let default_results = run_screening(&template, &references, &base, None, None, None);
+
+        let mut anchored_params = base.clone();
+        anchored_params.anchored = true;
+        anchored_params.anchored_length = Some(12);
+        let anchored_results =
+            run_screening(&template, &references, &anchored_params, None, None, None);
+
+        // Normalize the differing config fields, then compare.
+        fn strip(v: &mut serde_json::Value) {
+            if let serde_json::Value::Object(map) = v {
+                if let Some(params) = map.get_mut("params") {
+                    if let Some(params_obj) = params.as_object_mut() {
+                        params_obj.remove("anchored");
+                        params_obj.remove("anchored_length");
+                    }
+                }
+            }
+        }
+        let mut lhs = serde_json::to_value(&default_results).unwrap();
+        let mut rhs = serde_json::to_value(&anchored_results).unwrap();
+        strip(&mut lhs);
+        strip(&mut rhs);
+        assert_eq!(
+            lhs, rhs,
+            "anchored mode at L=L_anchor=min=max diverged from default mode"
+        );
+    }
+
+    /// At lengths greater than the anchor length, references whose anchor sits
+    /// too close to the 3' end of the reference (so right-extension would
+    /// overrun the reference) should become no-match for that length only,
+    /// while the anchor length itself still matches them.
+    #[test]
+    fn anchored_extension_past_reference_end_is_no_match_for_that_length() {
+        // Template: 16 bp. Anchor length 10 (= min_oligo_length).
+        // Long reference "TATGGTACGTNN..." matches at start 0 for L=10.
+        // A short reference "TATGGTACGT" is exactly 10 bp — anchor matches at
+        // start 0 but extending to L=12 would need ref bytes 0..12 (only 10
+        // available), so it's no-match at L=12.
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATGTT".to_string(),
+        };
+        let references = ReferenceData {
+            names: vec!["long".into(), "short".into()],
+            sequences: vec![
+                "TATGGTACGTCATGTTNNNN".to_string(), // 20 bp, plenty of room
+                "TATGGTACGT".to_string(),            // exactly anchor length
+            ],
+        };
+
+        let params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 1 }),
+            min_oligo_length: 10,
+            max_oligo_length: 12,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            anchored: true,
+            anchored_length: Some(10),
+            ..Default::default()
+        };
+
+        let results = run_screening(&template, &references, &params, None, None, None);
+
+        let at10 = &results.results_by_length.get(&10).unwrap().positions[0];
+        assert_eq!(at10.analysis.sequences_analyzed, 2);
+        assert_eq!(at10.analysis.no_match_count, 0);
+
+        let at12 = &results.results_by_length.get(&12).unwrap().positions[0];
+        assert_eq!(at12.analysis.sequences_analyzed, 1, "short ref must drop at L=12");
+        assert_eq!(at12.analysis.no_match_count, 1);
+    }
+
+    /// When the anchor accepts a reference at `L_anchor` but right-extension
+    /// pulls in enough flanking divergence to exceed `max_mismatches`, the
+    /// reference must become no-match at that longer length (Q3 in the
+    /// implementation doc).
+    #[test]
+    fn anchored_extension_exceeding_max_mismatches_is_no_match() {
+        // Template "AAAACCCCCCGG"; anchor length 6 → "AAAACC" (max_mm=1
+        // accepts).
+        // Reference "AAAACCXXTTTT": positions 0..6 = "AAAACC" — anchor exact
+        // match (0 mm). Extending to L=10 → reference[0..10] = "AAAACCXXTT".
+        // Template[0..10] = "AAAACCCCCC". Hamming("AAAACCXXTT", "AAAACCCCCC")
+        // = 4 mismatches (positions 6,7,8,9 differ). With max_mm = 1, this
+        // exceeds → no-match at L=10.
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "AAAACCCCCCGG".to_string(),
+        };
+        let references = ReferenceData {
+            names: vec!["divergent".into()],
+            sequences: vec!["AAAACCXXTTTT".to_string()],
+        };
+
+        let params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 1 }),
+            min_oligo_length: 6,
+            max_oligo_length: 10,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            anchored: true,
+            anchored_length: Some(6),
+            ..Default::default()
+        };
+
+        let results = run_screening(&template, &references, &params, None, None, None);
+
+        // L=6 (anchor): the reference matches.
+        let pos6 = &results.results_by_length.get(&6).unwrap().positions[0];
+        assert_eq!(pos6.analysis.sequences_analyzed, 1);
+        assert_eq!(pos6.analysis.no_match_count, 0);
+
+        // L=10: anchor still gave a position, but the Hamming distance
+        // against template[0..10] exceeds max_mismatches=1 → no-match.
+        let pos10 = &results.results_by_length.get(&10).unwrap().positions[0];
+        assert_eq!(pos10.analysis.sequences_analyzed, 0);
+        assert_eq!(pos10.analysis.no_match_count, 1);
+        assert!(pos10.analysis.skipped, "no valid match at L=10 should flag skipped");
+    }
+
+    /// Anchored exclusivity must derive per-length mismatch buckets from the
+    /// stored anchor positions, not by re-running the search. The histogram
+    /// at L_anchor should match what a default-mode run reports.
+    #[test]
+    fn anchored_exclusivity_histogram_matches_default_at_anchor_length() {
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATG".to_string(),
+        };
+        let references = ReferenceData {
+            names: vec!["R1".into()],
+            sequences: vec!["TATGGTACGTCATG".to_string()],
+        };
+        let exclusivity = ReferenceData {
+            names: vec!["E0".into(), "E1".into(), "E2".into()],
+            sequences: vec![
+                "TATGGTACGTCATG".to_string(),     // exact
+                "AAAAAAAAAAAAAA".to_string(),     // no match
+                "TATGGTACGTAATG".to_string(),     // 1 mm
+            ],
+        };
+
+        let base = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Simple,
+            simple: Some(SimpleParams { max_mismatches: 2 }),
+            min_oligo_length: 12,
+            max_oligo_length: 12,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            ..Default::default()
+        };
+        let default_results = run_screening(
+            &template,
+            &references,
+            &base,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        let mut anchored_params = base.clone();
+        anchored_params.anchored = true;
+        anchored_params.anchored_length = Some(12);
+        let anchored_results = run_screening(
+            &template,
+            &references,
+            &anchored_params,
+            Some(&exclusivity),
+            None,
+            None,
+        );
+
+        let default_excl = &default_results.results_by_length.get(&12).unwrap().positions[0]
+            .exclusivity
+            .as_ref()
+            .unwrap();
+        let anchored_excl = &anchored_results.results_by_length.get(&12).unwrap().positions[0]
+            .exclusivity
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(default_excl.total_sequences, anchored_excl.total_sequences);
+        assert_eq!(default_excl.no_match_count, anchored_excl.no_match_count);
+        assert_eq!(default_excl.min_mismatches, anchored_excl.min_mismatches);
+        // Bucket equality (ignore example_name since both should pick the
+        // same first-found example given matching iteration order).
+        let d_buckets: Vec<(u32, usize)> = default_excl
+            .mismatch_histogram
+            .iter()
+            .map(|b| (b.mismatches, b.count))
+            .collect();
+        let a_buckets: Vec<(u32, usize)> = anchored_excl
+            .mismatch_histogram
+            .iter()
+            .map(|b| (b.mismatches, b.count))
+            .collect();
+        assert_eq!(d_buckets, a_buckets);
     }
 }

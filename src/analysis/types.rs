@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::simplescreen::screener::Orientation;
+
 /// Analysis method selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnalysisMethod {
@@ -133,8 +135,25 @@ fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 fn is_default_aligner(k: &AlignerKind) -> bool {
     k.is_default()
+}
+
+/// Per-reference anchor position produced by a single alignment pass.
+///
+/// Used internally by anchored screening to record where the anchor oligo
+/// matched in each reference, so length-`L` fragments can be derived from
+/// that same position later instead of re-aligning per length. Not serialized.
+#[derive(Debug, Clone, Copy)]
+pub struct AnchorHit {
+    /// 0-based start position on the forward strand of the reference.
+    pub start: usize,
+    pub orientation: Orientation,
+    pub mismatches: u32,
 }
 
 pub const DEFAULT_MAX_SEEDS: u32 = 50;
@@ -183,6 +202,17 @@ pub struct AnalysisParams {
     /// used by `FixedAmbiguities` and `Incremental` methods.
     #[serde(default = "default_max_seeds", skip_serializing_if = "is_default_max_seeds")]
     pub max_seeds: u32,
+    /// When true, run the per-position search once at `anchored_length` and
+    /// reuse those positions to derive matched fragments for every length in
+    /// `[min_oligo_length, max_oligo_length]`. Defaults to false (legacy
+    /// behavior). Omitted from JSON output when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub anchored: bool,
+    /// Length of the anchor search when `anchored` is true. `None` falls back
+    /// to `min_oligo_length`. Must lie within `[min_oligo_length,
+    /// max_oligo_length]`. Omitted from JSON output when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchored_length: Option<u32>,
 }
 
 impl Default for AnalysisParams {
@@ -201,6 +231,8 @@ impl Default for AnalysisParams {
             length_skip: 0,
             var_limit: None,
             max_seeds: DEFAULT_MAX_SEEDS,
+            anchored: false,
+            anchored_length: None,
         }
     }
 }

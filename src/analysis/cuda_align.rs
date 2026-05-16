@@ -35,7 +35,7 @@ use once_cell::sync::Lazy;
 
 use super::simplescreen::pattern::{MAX_PATTERN_LEN, PreparedPattern};
 use super::simplescreen::screener::Orientation;
-use super::types::SimpleParams;
+use super::types::{AnchorHit, SimpleParams};
 
 // ───── FFI: declarations match cuda/diffalign_cuda.h ──────────────────────
 
@@ -392,6 +392,48 @@ pub fn collect_matches_with_cuda_aligner(
         }
     }
     (matched, no_match_count)
+}
+
+/// Per-reference anchor positions from a single GPU scan window. Same accept
+/// rules as `collect_matches_with_cuda_aligner`; the returned start is
+/// 0-based on the reference's forward strand.
+pub fn collect_anchors_with_cuda_aligner(
+    _aligner: &mut CudaAligner,
+    oligo: &[u8],
+    references: &[Vec<u8>],
+    params: &SimpleParams,
+) -> Vec<Option<AnchorHit>> {
+    let pattern = match PreparedPattern::build(oligo, params.max_mismatches) {
+        Ok(p) => p,
+        Err(_) => return references.iter().map(|_| None).collect(),
+    };
+    if !pattern.valid {
+        return references.iter().map(|_| None).collect();
+    }
+
+    let merged = match scan_window(&pattern, references) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("CUDA scan failed: {}", e);
+            return references.iter().map(|_| None).collect();
+        }
+    };
+
+    let len = pattern.len as usize;
+    merged
+        .into_iter()
+        .map(|h| {
+            h.map(|m| {
+                let end_0 = (m.end_pos as usize) + 1;
+                let start_0 = end_0 - len;
+                AnchorHit {
+                    start: start_0,
+                    orientation: m.orientation,
+                    mismatches: m.mismatches,
+                }
+            })
+        })
+        .collect()
 }
 
 pub fn collect_mismatch_counts_with_cuda_aligner(

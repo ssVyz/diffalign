@@ -135,7 +135,13 @@ fn run(
     let mut current_length: Option<u32> = None;
 
     while let Ok(update) = rx.recv() {
-        // Re-anchor the position bar when the length changes.
+        // `current_length = 0` is the anchored-mode sentinel: the screener
+        // is in the one-shot anchor pass, not iterating an oligo length.
+        // We label both bars accordingly and skip the length-bar increment
+        // when the pass finishes (it isn't a length).
+        let is_anchor_phase = update.current_length == 0;
+
+        // Re-anchor the position bar when the phase / length changes.
         if current_length != Some(update.current_length) {
             current_length = Some(update.current_length);
             position_bar.reset();
@@ -145,12 +151,22 @@ fn run(
                 .map(|(_, t)| *t as u64)
                 .unwrap_or(update.total_positions as u64);
             position_bar.set_length(total);
-            position_bar.set_message(format!("length {}", update.current_length));
+            if is_anchor_phase {
+                // Use the screener's message prefix as the bar label so the
+                // user sees e.g. "Anchor pass (L=18)" instead of "length 0".
+                let label = update
+                    .message
+                    .split(": Position")
+                    .next()
+                    .unwrap_or("Anchor pass")
+                    .to_string();
+                position_bar.set_message(label);
+                length_bar.set_message("anchor pass".to_string());
+            } else {
+                position_bar.set_message(format!("length {}", update.current_length));
+                length_bar.set_message(format!("current: {} bp", update.current_length));
+            }
             length_bar.set_position(update.lengths_completed as u64);
-            length_bar.set_message(format!(
-                "current: {} bp",
-                update.current_length
-            ));
         }
 
         // The screener emits "completed positions" via the progress message;
@@ -162,15 +178,18 @@ fn run(
             extract_completed(&update.message).unwrap_or(update.current_position + 1);
         position_bar.set_position(completed_for_length as u64);
 
-        // If a length finished, bump the length bar.
-        let target_total = plan
-            .iter()
-            .find(|(l, _)| *l == update.current_length)
-            .map(|(_, t)| *t)
-            .unwrap_or(0);
-        if target_total > 0 && completed_for_length >= target_total {
-            length_bar.inc(1);
-            current_length = None; // force re-anchor on the next update
+        // If a length finished, bump the length bar. Anchor phase is not a
+        // length — skip the increment even though its position bar fills up.
+        if !is_anchor_phase {
+            let target_total = plan
+                .iter()
+                .find(|(l, _)| *l == update.current_length)
+                .map(|(_, t)| *t)
+                .unwrap_or(0);
+            if target_total > 0 && completed_for_length >= target_total {
+                length_bar.inc(1);
+                current_length = None; // force re-anchor on the next update
+            }
         }
     }
 

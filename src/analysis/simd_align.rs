@@ -20,7 +20,7 @@
 use super::simplescreen::bitap::BitapState;
 use super::simplescreen::pattern::{MAX_PATTERN_LEN, PreparedPattern};
 use super::simplescreen::screener::{Hit, Orientation, screen};
-use super::types::SimpleParams;
+use super::types::{AnchorHit, SimpleParams};
 
 #[cfg(target_arch = "x86_64")]
 use super::simplescreen::bitap_simd::{LANES_AVX2, LaneBest, scan_avx2};
@@ -260,6 +260,80 @@ pub fn collect_matches_with_simd_aligner(
     }
 
     (matched, no_match_count)
+}
+
+/// Per-reference anchor positions. Same accept rules as
+/// `collect_matches_with_simd_aligner`; uses the AVX2 batched kernel for full
+/// chunks and falls back to the scalar bitap for the tail.
+pub fn collect_anchors_with_simd_aligner(
+    aligner: &mut SimdAligner,
+    oligo: &[u8],
+    references: &[Vec<u8>],
+    params: &SimpleParams,
+) -> Vec<Option<AnchorHit>> {
+    let pattern = match PreparedPattern::build(oligo, params.max_mismatches) {
+        Ok(p) => p,
+        Err(_) => return references.iter().map(|_| None).collect(),
+    };
+    if !pattern.valid {
+        return references.iter().map(|_| None).collect();
+    }
+
+    let mut out: Vec<Option<AnchorHit>> = Vec::with_capacity(references.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut idx = 0;
+        while idx + LANES <= references.len() {
+            let batch: [&[u8]; LANES_AVX2] = [
+                references[idx].as_slice(),
+                references[idx + 1].as_slice(),
+                references[idx + 2].as_slice(),
+                references[idx + 3].as_slice(),
+            ];
+            let results = scan_batch_avx2(&pattern, &batch);
+            for lane in 0..LANES_AVX2 {
+                let (mm, end_pos, orientation) = results[lane];
+                match (mm, end_pos) {
+                    (Some(mm), Some(end_pos)) => {
+                        let len = pattern.len as usize;
+                        let end_0 = end_pos as usize;
+                        let start_0 = end_0 + 1 - len;
+                        out.push(Some(AnchorHit {
+                            start: start_0,
+                            orientation,
+                            mismatches: mm,
+                        }));
+                    }
+                    _ => out.push(None),
+                }
+            }
+            idx += LANES;
+        }
+        for r in &references[idx..] {
+            aligner.scalar_hits.clear();
+            screen(&mut aligner.scalar_state, &pattern, r, &mut aligner.scalar_hits);
+            out.push(best_scalar_hit(&aligner.scalar_hits).map(|h| AnchorHit {
+                start: (h.start as usize) - 1,
+                orientation: h.orientation,
+                mismatches: h.mismatches,
+            }));
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for r in references {
+            aligner.scalar_hits.clear();
+            screen(&mut aligner.scalar_state, &pattern, r, &mut aligner.scalar_hits);
+            out.push(best_scalar_hit(&aligner.scalar_hits).map(|h| AnchorHit {
+                start: (h.start as usize) - 1,
+                orientation: h.orientation,
+                mismatches: h.mismatches,
+            }));
+        }
+    }
+
+    out
 }
 
 pub fn collect_mismatch_counts_with_simd_aligner(

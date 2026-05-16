@@ -10,6 +10,7 @@ nul
 # mds
 *.md
 !README.md
+!results_format.md
 
 # bin
 bin/

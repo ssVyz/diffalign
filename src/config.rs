@@ -36,6 +36,13 @@ pub struct Config {
     /// Number of seed sequences the ambiguity-aware variant finder tries per
     /// greedy step. Only used by `fixed` and `incremental` methods.
     pub max_seeds: u32,
+    /// Enable anchored mode: run the per-position search once at
+    /// `anchored_length` and derive every length's variants from those
+    /// positions. Defaults to false.
+    pub anchored: bool,
+    /// Length of the anchor search when `anchored = true`. `None` falls back
+    /// to `min_oligo_length` at run time.
+    pub anchored_length: Option<u32>,
 }
 
 impl Default for Config {
@@ -54,6 +61,8 @@ impl Default for Config {
             threads_percent: 100,
             var_limit: None,
             max_seeds: DEFAULT_MAX_SEEDS,
+            anchored: false,
+            anchored_length: None,
         }
     }
 }
@@ -106,6 +115,18 @@ var_limit =
 ; Higher values explore more starting points (better coverage) at
 ; linear runtime cost; 50 is a good default. Must be >= 1.
 max_seeds = 50
+
+; Anchored mode: when true, the per-position search runs once at
+; `anchored_length`, and every length in the length range derives its
+; variants from those stored positions (instead of re-running the search
+; per length). Much faster on wide length ranges; can introduce slight
+; bias because the position is fixed by the anchor length. Default false.
+anchored = false
+
+; Length used for the anchor search when anchored = true. Must lie within
+; [min_oligo_length, max_oligo_length]. Leave empty to fall back to
+; min_oligo_length.
+anchored_length =
 
 [aligner]
 ; Which alignment backend to use: pairwise | simple | simple_simd | simple_cuda
@@ -193,6 +214,8 @@ pub fn load(path: &Path) -> Result<Config> {
     // var_limit: empty or 0 means unlimited.
     cfg.var_limit = get_optional_u32(analysis, "var_limit")?.filter(|&n| n > 0);
     cfg.max_seeds = get_u32(analysis, "max_seeds")?.unwrap_or(cfg.max_seeds);
+    cfg.anchored = get_bool(analysis, "anchored")?.unwrap_or(cfg.anchored);
+    cfg.anchored_length = get_optional_u32(analysis, "anchored_length")?;
 
     // [aligner]
     let aligner = ini.section(Some("aligner"));

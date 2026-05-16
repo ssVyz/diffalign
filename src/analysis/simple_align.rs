@@ -17,7 +17,7 @@
 use super::simplescreen::bitap::BitapState;
 use super::simplescreen::pattern::{MAX_PATTERN_LEN, PreparedPattern};
 use super::simplescreen::screener::{Hit, Orientation, screen};
-use super::types::SimpleParams;
+use super::types::{AnchorHit, SimpleParams};
 
 /// Per-worker scratch state for the bitap aligner.
 ///
@@ -144,6 +144,38 @@ pub fn collect_matches_with_simple_aligner(
         }
     }
     (matched, no_match_count)
+}
+
+/// Per-reference anchor positions. Same accept rules as
+/// `collect_matches_with_simple_aligner`; the returned start position is
+/// 0-based on the reference's forward strand (same coordinate system the
+/// downstream length-`L` fragment extractor expects).
+pub fn collect_anchors_with_simple_aligner(
+    aligner: &mut SimpleAligner,
+    oligo: &[u8],
+    references: &[Vec<u8>],
+    params: &SimpleParams,
+) -> Vec<Option<AnchorHit>> {
+    let pattern = match PreparedPattern::build(oligo, params.max_mismatches) {
+        Ok(p) => p,
+        Err(_) => return references.iter().map(|_| None).collect(),
+    };
+    if !pattern.valid {
+        return references.iter().map(|_| None).collect();
+    }
+
+    references
+        .iter()
+        .map(|reference| {
+            aligner.hits.clear();
+            screen(&mut aligner.state, &pattern, reference, &mut aligner.hits);
+            best_hit(&aligner.hits).map(|h| AnchorHit {
+                start: (h.start as usize) - 1,
+                orientation: h.orientation,
+                mismatches: h.mismatches,
+            })
+        })
+        .collect()
 }
 
 pub fn collect_mismatch_counts_with_simple_aligner(

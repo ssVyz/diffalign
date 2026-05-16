@@ -126,6 +126,20 @@ pub struct Cli {
     #[arg(long = "max-seeds")]
     pub max_seeds: Option<u32>,
 
+    // ── anchored mode ─────────────────────────────────────────────────
+    /// Enable anchored mode: run the per-position search once at
+    /// `--anchored-length` and reuse the matched positions for every
+    /// length in the length range. Faster on wide length ranges; the
+    /// position bias of the anchor length carries through to every length.
+    #[arg(long = "anchored", action = ArgAction::SetTrue)]
+    pub anchored: bool,
+
+    /// Length used for the anchor search. Defaults to --min-oligo-length.
+    /// Must lie within [min_oligo_length, max_oligo_length]. Only meaningful
+    /// when anchored mode is on (via --anchored or the INI).
+    #[arg(long = "anchored-length", value_name = "N")]
+    pub anchored_length: Option<u32>,
+
     // ── threads ───────────────────────────────────────────────────────
     /// Percentage of available CPU cores to use (1-100).
     /// Resolved to a concrete core count (floor, min 1) at run time.
@@ -284,6 +298,29 @@ impl Cli {
             None
         };
 
+        // Anchored mode resolution: CLI flag forces it on; otherwise the INI
+        // setting wins. `--anchored-length` is taken from CLI if given, else
+        // from the INI; if neither supplied a value, it stays None and falls
+        // back to `min_oligo_length` at run time inside the screener.
+        let anchored = self.anchored || cfg.anchored;
+        let anchored_length = self.anchored_length.or(cfg.anchored_length);
+        if let Some(al) = anchored_length {
+            if !anchored {
+                bail!(
+                    "anchored_length = {} given without enabling anchored mode; pass --anchored or set anchored = true in the INI",
+                    al
+                );
+            }
+            if al < min_oligo_length || al > max_oligo_length {
+                bail!(
+                    "anchored_length ({}) must lie within [min_oligo_length, max_oligo_length] = [{}, {}]",
+                    al,
+                    min_oligo_length,
+                    max_oligo_length
+                );
+            }
+        }
+
         Ok(AnalysisParams {
             method,
             pairwise,
@@ -298,6 +335,8 @@ impl Cli {
             length_skip,
             var_limit,
             max_seeds,
+            anchored,
+            anchored_length,
         })
     }
 
