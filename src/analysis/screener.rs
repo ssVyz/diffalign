@@ -992,6 +992,54 @@ mod tests {
     }
 
     #[test]
+    fn pairwise_finds_reverse_complement_matches() {
+        // Regression test: until the strand-handling fix, the pairwise
+        // aligner only scanned the forward strand and silently no-match'd
+        // references where the oligo appeared only on the reverse complement.
+        // The bitap family has always scanned both strands; this test pins
+        // the same contract on `AlignerKind::Pairwise`.
+        use crate::analysis::types::AlignerKind;
+
+        let template = TemplateData {
+            name: "Template".to_string(),
+            sequence: "TATGGTACGTCATG".to_string(),
+        };
+        // RC of the 10-bp window `TATGGTACGT` is `ACGTACCATA`.
+        // - `fwd` reference contains the oligo on the forward strand.
+        // - `rc` reference contains the oligo on the reverse strand
+        //   (forward strand carries `ACGTACCATA`).
+        // Both should be counted as matches and group into the same
+        // oligo-oriented variant.
+        let references = ReferenceData {
+            names: vec!["fwd".into(), "rc".into()],
+            sequences: vec![
+                "TATGGTACGTCATG".into(),
+                "AAAACGTACCATAAA".into(),
+            ],
+        };
+
+        let params = AnalysisParams {
+            method: AnalysisMethod::NoAmbiguities,
+            aligner: AlignerKind::Pairwise,
+            min_oligo_length: 10,
+            max_oligo_length: 10,
+            resolution: 1,
+            coverage_threshold: 95.0,
+            ..Default::default()
+        };
+
+        let results = run_screening(&template, &references, &params, None, None, None);
+        let pos = &results.results_by_length.get(&10).unwrap().positions[0];
+        let a = &pos.analysis;
+
+        assert_eq!(a.sequences_analyzed, 2, "RC reference was not counted");
+        assert_eq!(a.no_match_count, 0);
+        assert_eq!(a.variants.len(), 1);
+        assert_eq!(a.variants[0].sequence, "TATGGTACGT");
+        assert_eq!(a.variants[0].count, 2);
+    }
+
+    #[test]
     fn var_limit_folds_dropped_variants_into_no_match() {
         // Use the simple (bitap) aligner with max_mismatches=2 so each
         // single-base-substituted reference returns a full-length matched

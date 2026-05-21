@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-05-21
+
+### Fixed
+- Pairwise aligner (`--aligner pairwise`) now scans both the forward strand
+  and the reverse complement of each reference, matching the long-standing
+  behavior of the bitap aligners (`simple` / `simple_simd` / `simple_cuda`).
+  Previously, references where the target oligo appeared only on the reverse
+  strand were silently counted as `no_match` under the pairwise backend. This
+  affected `variants` / `count` / `percentage` / `variants_for_threshold` in
+  the main analysis, the `mismatch_histogram` in differential mode (RC-only
+  off-targets were misclassified as `u32::MAX` "no match"), and anchor
+  derivation in anchored mode. When the reverse-strand pass wins, the
+  matched fragment is reverse-complemented back to oligo orientation before
+  variant grouping, and `AnchorHit.orientation` is recorded correctly.
+
+### Added
+- Strand-handling parity tests:
+  `pairwise::reverse_complement_match_returns_oligo_oriented_fragment`,
+  `pairwise::forward_preferred_over_reverse_on_ties`,
+  `pairwise::anchor_orientation_recorded_for_reverse_hits`, and the
+  end-to-end `screener::pairwise_finds_reverse_complement_matches` so
+  the divergence cannot regress unnoticed.
+
 ## [0.9.2] - 2026-05-21
 
 ### Changed

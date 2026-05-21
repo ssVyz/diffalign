@@ -1,4 +1,10 @@
 //! Pairwise alignment for matching oligos against reference sequences.
+//!
+//! Forward + reverse-complement scanning is enabled. When the best hit for a
+//! reference is on the reverse strand, the matched fragment is
+//! reverse-complemented before being returned, so downstream variant analysis
+//! sees all fragments in the same orientation as the oligo. Mirrors the
+//! strand-handling contract of the bitap aligners in `simple_align.rs`.
 
 use bio::alignment::AlignmentOperation;
 use bio::alignment::pairwise::{Aligner, MatchFunc, MatchParams};
@@ -90,6 +96,85 @@ pub fn align_oligo_to_reference(
     process_alignment(&mut aligner, oligo, reference)
 }
 
+fn complement_byte(b: u8) -> u8 {
+    match b {
+        b'A' => b'T',
+        b'T' | b'U' => b'A',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'a' => b't',
+        b't' | b'u' => b'a',
+        b'c' => b'g',
+        b'g' => b'c',
+        // Anything else (N, IUPAC codes, '-', etc.) is passed through; keeps
+        // parity with `simple_align.rs::complement_byte`.
+        other => other,
+    }
+}
+
+fn reverse_complement_bytes(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().rev().map(|&b| complement_byte(b)).collect()
+}
+
+fn reverse_complement_str(s: &str) -> String {
+    let bytes: Vec<u8> = s.bytes().rev().map(complement_byte).collect();
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// Run the SW aligner on both the oligo and its reverse complement against
+/// the same reference; return the best accepted hit (if any), already
+/// re-oriented to the oligo's strand.
+///
+/// Mirrors the strand-handling semantics of `scan_reference` in
+/// `simple_align.rs`:
+/// - both strands are tried;
+/// - accept criteria are
+///   `full_coverage && !has_gaps && mismatches <= max_mismatches`;
+/// - tie-break by lowest mismatches, then lowest `ystart` (forward-strand
+///   coordinate in the reference), then Forward over Reverse;
+/// - when the Reverse pass wins, the matched fragment is reverse-complemented
+///   back to oligo orientation.
+fn best_strand_match<F: MatchFunc>(
+    aligner: &mut Aligner<F>,
+    oligo: &[u8],
+    rc_oligo: &[u8],
+    reference: &[u8],
+    max_mismatches: u32,
+) -> Option<(PairwiseMatch, Orientation)> {
+    let fwd = process_alignment(aligner, oligo, reference);
+    let rev = process_alignment(aligner, rc_oligo, reference);
+
+    let fwd_ok = fwd.full_coverage
+        && !fwd.has_gaps
+        && fwd.mismatches <= max_mismatches as usize;
+    let rev_ok = rev.full_coverage
+        && !rev.has_gaps
+        && rev.mismatches <= max_mismatches as usize;
+
+    match (fwd_ok, rev_ok) {
+        (false, false) => None,
+        (true, false) => Some((fwd, Orientation::Forward)),
+        (false, true) => Some((rc_orient(rev), Orientation::Reverse)),
+        (true, true) => {
+            let fwd_wins = match fwd.mismatches.cmp(&rev.mismatches) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => fwd.start <= rev.start,
+            };
+            if fwd_wins {
+                Some((fwd, Orientation::Forward))
+            } else {
+                Some((rc_orient(rev), Orientation::Reverse))
+            }
+        }
+    }
+}
+
+fn rc_orient(mut m: PairwiseMatch) -> PairwiseMatch {
+    m.matched_sequence = reverse_complement_str(&m.matched_sequence);
+    m
+}
+
 pub fn collect_matches(
     oligo: &[u8],
     references: &[Vec<u8>],
@@ -115,17 +200,12 @@ pub fn collect_matches(
             if a == b { match_score } else { mismatch_score }
         },
     );
+    let rc_oligo = reverse_complement_bytes(oligo);
 
     for reference in references {
-        let result = process_alignment(&mut aligner, oligo, reference);
-
-        if !result.full_coverage
-            || result.has_gaps
-            || result.mismatches > params.max_mismatches as usize
-        {
-            no_match_count += 1;
-        } else {
-            matched.push(result.matched_sequence);
+        match best_strand_match(&mut aligner, oligo, &rc_oligo, reference, params.max_mismatches) {
+            Some((result, _)) => matched.push(result.matched_sequence),
+            None => no_match_count += 1,
         }
     }
 
@@ -140,49 +220,39 @@ pub fn collect_matches_with_aligner(
 ) -> (Vec<String>, usize) {
     let mut matched = Vec::new();
     let mut no_match_count = 0;
+    let rc_oligo = reverse_complement_bytes(oligo);
 
     for reference in references {
-        let result = process_alignment(aligner, oligo, reference);
-
-        if !result.full_coverage
-            || result.has_gaps
-            || result.mismatches > params.max_mismatches as usize
-        {
-            no_match_count += 1;
-        } else {
-            matched.push(result.matched_sequence);
+        match best_strand_match(aligner, oligo, &rc_oligo, reference, params.max_mismatches) {
+            Some((result, _)) => matched.push(result.matched_sequence),
+            None => no_match_count += 1,
         }
     }
 
     (matched, no_match_count)
 }
 
-/// One alignment pass per reference; record the matched window's start
-/// position (along with mismatches and orientation) for every reference that
-/// passes the same accept criteria as `collect_matches_with_aligner`. Used by
-/// anchored mode.
+/// Per-reference anchor positions. Same accept rules as
+/// `collect_matches_with_aligner`; the returned start is 0-based on the
+/// reference's forward strand (matching the bitap path's coordinate system),
+/// regardless of which strand the best hit came from. Used by anchored mode.
 pub fn collect_anchors_with_aligner(
     aligner: &mut DnaAligner,
     oligo: &[u8],
     references: &[Vec<u8>],
     params: &PairwiseParams,
 ) -> Vec<Option<AnchorHit>> {
+    let rc_oligo = reverse_complement_bytes(oligo);
     references
         .iter()
         .map(|reference| {
-            let result = process_alignment(aligner, oligo, reference);
-            if !result.full_coverage
-                || result.has_gaps
-                || result.mismatches > params.max_mismatches as usize
-            {
-                None
-            } else {
-                Some(AnchorHit {
+            best_strand_match(aligner, oligo, &rc_oligo, reference, params.max_mismatches).map(
+                |(result, orientation)| AnchorHit {
                     start: result.start,
-                    orientation: Orientation::Forward,
+                    orientation,
                     mismatches: result.mismatches as u32,
-                })
-            }
+                },
+            )
         })
         .collect()
 }
@@ -193,18 +263,12 @@ pub fn collect_mismatch_counts_with_aligner(
     references: &[Vec<u8>],
     params: &PairwiseParams,
 ) -> Vec<Option<u32>> {
+    let rc_oligo = reverse_complement_bytes(oligo);
     references
         .iter()
         .map(|reference| {
-            let result = process_alignment(aligner, oligo, reference);
-            if !result.full_coverage
-                || result.has_gaps
-                || result.mismatches > params.max_mismatches as usize
-            {
-                None
-            } else {
-                Some(result.mismatches as u32)
-            }
+            best_strand_match(aligner, oligo, &rc_oligo, reference, params.max_mismatches)
+                .map(|(result, _)| result.mismatches as u32)
         })
         .collect()
 }
@@ -284,5 +348,61 @@ mod tests {
         let (matched, no_match) = collect_matches(oligo, &references, &params);
         assert_eq!(matched.len(), 1);
         assert_eq!(no_match, 1);
+    }
+
+    #[test]
+    fn reverse_complement_match_returns_oligo_oriented_fragment() {
+        // RC of oligo TATGGTACGT is ACGTACCATA. Embed that on the forward
+        // strand of the reference and confirm the returned fragment is RC'd
+        // back to the oligo's orientation. Mirrors the bitap test in
+        // `simple_align.rs`.
+        let oligo = b"TATGGTACGT";
+        let references: Vec<Vec<u8>> = vec![b"NNNNACGTACCATANNNN".to_vec()];
+        let mut params = default_params();
+        params.max_mismatches = 0;
+
+        let (matched, no_match) = collect_matches(oligo, &references, &params);
+        assert_eq!(no_match, 0);
+        assert_eq!(matched, vec!["TATGGTACGT".to_string()]);
+    }
+
+    #[test]
+    fn forward_preferred_over_reverse_on_ties() {
+        // A palindromic-ish reference where both forward and reverse passes
+        // would accept with equal mismatches. Forward must win the tie so
+        // the matched fragment comes back unaltered.
+        let oligo = b"AAATTT"; // RC is AAATTT — palindrome
+        let references: Vec<Vec<u8>> = vec![b"GGAAATTTGG".to_vec()];
+        let mut params = default_params();
+        params.max_mismatches = 0;
+
+        let (matched, no_match) = collect_matches(oligo, &references, &params);
+        assert_eq!(no_match, 0);
+        assert_eq!(matched, vec!["AAATTT".to_string()]);
+    }
+
+    #[test]
+    fn anchor_orientation_recorded_for_reverse_hits() {
+        let oligo = b"TATGGTACGT";
+        let references: Vec<Vec<u8>> = vec![
+            b"TATGGTACGTCATG".to_vec(),         // forward exact match
+            b"NNNNACGTACCATANNNN".to_vec(),     // reverse exact match
+        ];
+        let mut params = default_params();
+        params.max_mismatches = 0;
+
+        let mut aligner = create_aligner(oligo.len(), 32, &params);
+        let anchors = collect_anchors_with_aligner(&mut aligner, oligo, &references, &params);
+
+        assert!(matches!(
+            anchors[0],
+            Some(AnchorHit { orientation: Orientation::Forward, mismatches: 0, .. })
+        ));
+        assert!(matches!(
+            anchors[1],
+            Some(AnchorHit { orientation: Orientation::Reverse, mismatches: 0, .. })
+        ));
+        // Reverse-pass start is in forward-strand coordinates of the reference.
+        assert_eq!(anchors[1].unwrap().start, 4);
     }
 }
