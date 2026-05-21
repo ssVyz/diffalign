@@ -63,6 +63,8 @@ currently allowlisted files are:
 If you add a new markdown file that should be tracked, add it to the allowlist
 in `.gitignore`. Otherwise it will be silently ignored.
 
+Do not make any commits or push to github on your own. This is currently a human task.
+
 ## Open work
 
 See `version1_todo.md` for the road-to-1.0 punch list. That file is
