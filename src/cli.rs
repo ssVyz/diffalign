@@ -341,17 +341,20 @@ impl Cli {
     }
 
     fn resolve_method(&self, cfg: &Config) -> Result<AnalysisMethod> {
-        // Defaults from the INI...
-        let (mut method_name, mut fixed_amb, mut incr_pct, mut incr_max_amb): (
-            &str,
-            u32,
-            u32,
-            Option<u32>,
-        ) = match cfg.method {
-            AnalysisMethod::NoAmbiguities => ("none", 1, 50, None),
-            AnalysisMethod::FixedAmbiguities(n) => ("fixed", n, 50, None),
-            AnalysisMethod::Incremental(p, m) => ("incremental", 1, p, m),
+        // Defaults from the INI. Each method's parameters are taken from their
+        // own INI keys (`fixed_ambiguities`, `incremental_pct`,
+        // `incremental_max_ambiguities`) rather than reconstructed from
+        // `cfg.method`'s discriminant, so a CLI `--method` switch picks up the
+        // INI's settings for the newly-selected method instead of silently
+        // falling back to built-in defaults.
+        let mut method_name: &str = match cfg.method {
+            AnalysisMethod::NoAmbiguities => "none",
+            AnalysisMethod::FixedAmbiguities(_) => "fixed",
+            AnalysisMethod::Incremental(_, _) => "incremental",
         };
+        let mut fixed_amb = cfg.fixed_ambiguities;
+        let mut incr_pct = cfg.incremental_pct;
+        let mut incr_max_amb = cfg.incremental_max_amb;
 
         // ...overridden per-field by CLI flags.
         if let Some(ref m) = self.method {
@@ -494,5 +497,55 @@ mod tests {
         assert_eq!(parse_optional_u32("", "--x").unwrap(), None);
         assert_eq!(parse_optional_u32("3", "--x").unwrap(), Some(3));
         assert!(parse_optional_u32("foo", "--x").is_err());
+    }
+
+    /// Regression: `--method incremental` on top of an INI whose `method` is
+    /// not `incremental` must still pick up the INI's `incremental_pct` and
+    /// `incremental_max_ambiguities`. Before the per-method-defaults fix, this
+    /// silently fell back to 50% / unlimited because `cfg.method`'s enum
+    /// variant didn't carry the inactive method's parameters.
+    #[test]
+    fn cli_method_override_inherits_ini_incremental_params() {
+        let cfg = Config {
+            method: AnalysisMethod::NoAmbiguities,
+            incremental_pct: 25,
+            incremental_max_amb: Some(3),
+            ..Config::default()
+        };
+        let cli = Cli {
+            template: None,
+            reference: None,
+            diff: None,
+            output: None,
+            method: Some("incremental".to_string()),
+            fixed_ambiguities: None,
+            incremental_pct: None,
+            incremental_max_amb: None,
+            aligner: None,
+            match_score: None,
+            mismatch_score: None,
+            gap_open_penalty: None,
+            gap_extend_penalty: None,
+            max_mismatches: None,
+            exclude_n: false,
+            no_exclude_n: false,
+            min_oligo_length: None,
+            max_oligo_length: None,
+            length_skip: None,
+            resolution: None,
+            coverage_threshold: None,
+            var_limit: None,
+            max_seeds: None,
+            anchored: false,
+            anchored_length: None,
+            threads_percent: None,
+            quiet: false,
+            timer: false,
+            mkini: false,
+            check_config: false,
+            config: None,
+        };
+        let method = cli.resolve_method(&cfg).unwrap();
+        assert_eq!(method, AnalysisMethod::Incremental(25, Some(3)));
     }
 }

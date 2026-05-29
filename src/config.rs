@@ -20,6 +20,16 @@ pub const INI_FILE_NAME: &str = "diffalign.ini";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub method: AnalysisMethod,
+    /// INI-supplied default for the `fixed` method's ambiguity cap. Kept
+    /// separately from `method` so a CLI `--method fixed` can pick it up even
+    /// when the INI's `method` field selected something else.
+    pub fixed_ambiguities: u32,
+    /// INI-supplied default for the `incremental` method's target coverage
+    /// percentage per step. Same rationale as `fixed_ambiguities`.
+    pub incremental_pct: u32,
+    /// INI-supplied default for the `incremental` method's max-ambiguity cap.
+    /// `None` = unlimited. Same rationale as `fixed_ambiguities`.
+    pub incremental_max_amb: Option<u32>,
     pub aligner: AlignerKind,
     pub pairwise: PairwiseParams,
     pub simple: SimpleParams,
@@ -49,6 +59,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             method: AnalysisMethod::NoAmbiguities,
+            fixed_ambiguities: 1,
+            incremental_pct: 50,
+            incremental_max_amb: None,
             aligner: AlignerKind::Pairwise,
             pairwise: PairwiseParams::default(),
             simple: SimpleParams::default(),
@@ -200,10 +213,15 @@ pub fn load(path: &Path) -> Result<Config> {
     // [analysis]
     let analysis = ini.section(Some("analysis"));
     let method_str = get_str(analysis, "method").unwrap_or_else(|| "none".to_string());
-    let fixed_amb = get_u32(analysis, "fixed_ambiguities")?.unwrap_or(1);
-    let incr_pct = get_u32(analysis, "incremental_pct")?.unwrap_or(50);
-    let incr_max_amb = get_optional_u32(analysis, "incremental_max_ambiguities")?;
-    cfg.method = parse_method(&method_str, fixed_amb, incr_pct, incr_max_amb)?;
+    cfg.fixed_ambiguities = get_u32(analysis, "fixed_ambiguities")?.unwrap_or(cfg.fixed_ambiguities);
+    cfg.incremental_pct = get_u32(analysis, "incremental_pct")?.unwrap_or(cfg.incremental_pct);
+    cfg.incremental_max_amb = get_optional_u32(analysis, "incremental_max_ambiguities")?;
+    cfg.method = parse_method(
+        &method_str,
+        cfg.fixed_ambiguities,
+        cfg.incremental_pct,
+        cfg.incremental_max_amb,
+    )?;
     cfg.exclude_n = get_bool(analysis, "exclude_n")?.unwrap_or(cfg.exclude_n);
     cfg.min_oligo_length = get_u32(analysis, "min_oligo_length")?.unwrap_or(cfg.min_oligo_length);
     cfg.max_oligo_length = get_u32(analysis, "max_oligo_length")?.unwrap_or(cfg.max_oligo_length);
@@ -414,6 +432,8 @@ incremental_max_ambiguities = 2
         fs::write(&path, body).unwrap();
         let cfg = load(&path).unwrap();
         assert_eq!(cfg.method, AnalysisMethod::Incremental(25, Some(2)));
+        assert_eq!(cfg.incremental_pct, 25);
+        assert_eq!(cfg.incremental_max_amb, Some(2));
     }
 
     #[test]
@@ -429,6 +449,31 @@ incremental_max_ambiguities =
         fs::write(&path, body).unwrap();
         let cfg = load(&path).unwrap();
         assert_eq!(cfg.method, AnalysisMethod::Incremental(50, None));
+        assert_eq!(cfg.incremental_max_amb, None);
+    }
+
+    #[test]
+    fn retains_incremental_keys_when_method_is_none() {
+        // Regression: even when `method = none` selects the no-ambiguities
+        // method, the per-method INI keys for `fixed` and `incremental` must
+        // still land on `Config`. Otherwise a CLI override like
+        // `--method incremental` silently falls back to built-in defaults
+        // (50% / unlimited ambiguities) instead of the INI's settings.
+        let dir = tempdir();
+        let path = dir.join("diffalign.ini");
+        let body = r#"
+[analysis]
+method = none
+fixed_ambiguities = 2
+incremental_pct = 25
+incremental_max_ambiguities = 3
+"#;
+        fs::write(&path, body).unwrap();
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.method, AnalysisMethod::NoAmbiguities);
+        assert_eq!(cfg.fixed_ambiguities, 2);
+        assert_eq!(cfg.incremental_pct, 25);
+        assert_eq!(cfg.incremental_max_amb, Some(3));
     }
 
     #[test]
@@ -440,13 +485,20 @@ incremental_max_ambiguities =
     }
 
     fn tempdir() -> PathBuf {
+        // Process id + nanos was not unique under parallel test runs (rare but
+        // observable nanos collisions), causing tests to read each other's
+        // INI files. The atomic counter eliminates the collision window.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "diffalign-test-{}-{}",
+            "diffalign-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            n
         ));
         fs::create_dir_all(&dir).unwrap();
         dir

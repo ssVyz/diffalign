@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-05-29
+
+### Fixed
+- `--method` on the command line now correctly inherits the INI's per-method
+  parameters for the newly selected method. Previously, switching the method
+  via CLI (e.g. `--method incremental` against an INI whose `method = none`)
+  silently discarded the INI's `incremental_pct` / `incremental_max_ambiguities`
+  (and equivalently for `fixed_ambiguities`) and fell back to built-in defaults
+  — 50% target coverage and *unlimited* ambiguity codes per variant. In
+  practice this produced "incremental" variants with far more ambiguities than
+  the configured cap (predominantly Ns when `exclude_n = false`, other IUPAC
+  codes when `exclude_n = true`). Each method's parameters are now stored on
+  the loaded config independently of which `method` is active, so a CLI
+  override picks them up.
+
+### Added
+- Regression tests for the CLI/INI method merge:
+  `config::tests::retains_incremental_keys_when_method_is_none` pins that
+  per-method INI keys are preserved when another method is active, and
+  `cli::tests::cli_method_override_inherits_ini_incremental_params` pins the
+  end-to-end behavior of `--method incremental` on top of `method = none`.
+
 ## [0.9.3] - 2026-05-21
 
 ### Fixed
