@@ -35,6 +35,7 @@ impl KeyListener {
             ));
             return None;
         }
+        restore_output_processing();
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
@@ -61,6 +62,40 @@ impl Drop for KeyListener {
         let _ = disable_raw_mode();
     }
 }
+
+/// crossterm's `enable_raw_mode` applies `cfmakeraw` on Unix, which clears the
+/// `OPOST` output flag and thereby disables `ONLCR` (the `\n` -> `\r\n`
+/// translation). indicatif relies on that translation to redraw its stacked
+/// progress bars in place; without it, every redraw appends a fresh copy
+/// instead of overwriting the previous one (the Linux progress-bar "spam").
+///
+/// We only need raw *input* — single keypresses with no echo — so re-enable
+/// output post-processing while leaving the input side raw. On disable,
+/// crossterm restores the original termios (which had `OPOST` on), so no extra
+/// teardown is required.
+///
+/// Windows is unaffected: its raw mode only flips input console-mode flags and
+/// indicatif repositions the cursor via the Win32 console API, so this is a
+/// no-op there.
+#[cfg(unix)]
+fn restore_output_processing() {
+    use std::os::unix::io::AsRawFd;
+
+    // indicatif draws to stderr; termios flags belong to the underlying tty
+    // device, so operating on stderr's fd targets the same terminal crossterm
+    // just put into raw mode.
+    let fd = std::io::stderr().as_raw_fd();
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut termios) == 0 {
+            termios.c_oflag |= libc::OPOST | libc::ONLCR;
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &termios);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_output_processing() {}
 
 fn debug_keys_enabled() -> bool {
     std::env::var_os("DIFFALIGN_DEBUG_KEYS")

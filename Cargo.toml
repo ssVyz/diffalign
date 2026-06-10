@@ -1,6 +1,6 @@
 [package]
 name = "diffalign"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2021"
 rust-version = "1.77.2"
 build = "build.rs"
@@ -34,6 +34,13 @@ indicatif = "0.17"
 rust-ini = "0.21"
 anyhow = "1"
 crossterm = "0.27"
+
+# Used only to re-enable terminal output post-processing (OPOST/ONLCR) after
+# crossterm puts the tty into raw mode for the hotkey listener; without it
+# indicatif's stacked progress bars spam the screen on Unix. crossterm already
+# pulls libc in transitively on Unix, so this adds no new build weight.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 cc = "1.0"

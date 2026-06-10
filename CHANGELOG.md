@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-06-10
+
+### Fixed
+- Live progress bars no longer spam the screen on Linux/Unix terminals.
+  Enabling the pause/resume hotkey listener put the terminal into raw mode,
+  which on Unix also disabled newline output processing (`OPOST`/`ONLCR`).
+  indicatif relies on that to redraw its stacked bars in place, so every
+  refresh appended a fresh "Lengths …" line instead of overwriting the
+  previous one (and pushed the `[paused]` status off-screen). Raw mode is now
+  restricted to input only; output processing is restored immediately after
+  it is enabled. Windows behavior is unchanged.
+
 ## [0.9.4] - 2026-05-29
 
 ### Fixed

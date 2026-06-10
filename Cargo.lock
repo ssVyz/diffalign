@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "diffalign"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "bio",
@@ -387,6 +387,7 @@ dependencies = [
  "clap",
  "crossterm",
  "indicatif",
+ "libc",
  "mimalloc",
  "once_cell",
  "rayon",
