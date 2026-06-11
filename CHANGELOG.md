@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-06-11
+
+## Minor change (manual, not agent)
+- Adjusted mkini command parameters
+
 ## [0.9.5] - 2026-06-10
 
 ### Fixed

@@ -83,7 +83,6 @@ impl Default for Config {
 /// Default INI text written by `--mkini`.
 pub const DEFAULT_INI_TEMPLATE: &str = r#"; diffalign.ini — default configuration
 ;
-; Values here are the defaults used when no matching CLI flag is given.
 ; CLI flags always override values in this file.
 
 [analysis]
@@ -94,7 +93,7 @@ method = none
 fixed_ambiguities = 1
 
 ; Used when method = incremental: target coverage percentage per step (1-100).
-incremental_pct = 50
+incremental_pct = 66
 
 ; Used when method = incremental: maximum ambiguity codes per variant.
 ; Leave empty for unlimited.
@@ -104,8 +103,8 @@ incremental_max_ambiguities =
 exclude_n = true
 
 ; Oligo length range (inclusive).
-min_oligo_length = 18
-max_oligo_length = 25
+min_oligo_length = 16
+max_oligo_length = 30
 
 ; Number of lengths to skip between processed lengths.
 ; 0 = process every length, 1 = every other (e.g. 20, 22, 24), etc.
@@ -115,19 +114,19 @@ length_skip = 0
 resolution = 1
 
 ; Target cumulative variant coverage percentage (0-100).
-coverage_threshold = 90.0
+coverage_threshold = 99.0
 
 ; Maximum number of variants recorded per position.
 ; Leave empty (or 0) for no limit. When the limit is reached, the
 ; remaining variants' counts are folded into the no-match category
 ; for that position. Useful for keeping output JSON files manageable.
-var_limit =
+var_limit = 15
 
 ; Number of seed sequences the ambiguity-aware variant finder tries
 ; per greedy step. Only used by methods `fixed` and `incremental`.
 ; Higher values explore more starting points (better coverage) at
 ; linear runtime cost; 50 is a good default. Must be >= 1.
-max_seeds = 50
+max_seeds = 1000
 
 ; Anchored mode: when true, the per-position search runs once at
 ; `anchored_length`, and every length in the length range derives its
@@ -156,7 +155,7 @@ anchored_length =
 ;                 Works with every method; caps max_mismatches at 16. Requires
 ;                 an NVIDIA GPU + CUDA runtime at startup; the program errors
 ;                 out otherwise. Output is bit-identical to simple.
-kind = pairwise
+kind = simple
 
 [pairwise]
 match_score = 2
@@ -167,7 +166,7 @@ max_mismatches = 8
 
 [simple]
 ; Maximum substitutions permitted per match for the bitap backend.
-max_mismatches = 8
+max_mismatches = 10
 
 [threads]
 ; Percentage of available CPU cores to use (1-100). Floor with min of 1 thread.
