@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-12
+
+### Added
+- diffalign is now dual-licensed under the MIT License and the Apache License,
+  Version 2.0, at your option. The full license texts are in `LICENSE-MIT`
+  and `LICENSE-APACHE`, and the crate metadata declares
+  `MIT OR Apache-2.0`.
+
+### Changed
+- The README's License section now describes the dual licensing, and a new
+  Contribution section states that contributions are dual-licensed under the
+  same terms.
+
 ## [0.9.6] - 2026-06-11
 
 ## Minor change (manual, not agent)
