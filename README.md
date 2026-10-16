@@ -16,26 +16,39 @@ The output is a single JSON file conforming to [`results_format.md`](results_for
 *if you have no time and you just want to run it for testing*
 
 **Step 1:** Clone diffalign from github if you haven't already. (run from a folder of your choice)
+
 > git clone https://github.com/ssVyz/diffalign
+
 ... then: get the result viewer
+
 > git clone https://github.com/ssVyz/diffalign_result_viewer
+
 ... then: get the example sequence set
+
 > git clone https://github.com/ssVyz/diffalign_example_set
+
 
 **Step 2:** Compile the binary. You need a Rust toolchain. You also need Python for the result viewer if you are using it.
 ... build from the project folder:
+
 > cargo build --release
+
 ... binary will appear in your chosen folder ../diffalign/target/release
 ... either add to path or copy/paste to wherever you want to run it.
 
 **Step 3:** Run diffalign on the example files.
+
 > diffalign flua_pdm09_m_refseq.fasta FluA_m_1y_0806_sequences.fasta -o test_output.json
+
 ... at the location of the test files. It will emit a test_output.json as your result
 
 **Step 4:** Open the file with the result viewer. You need astral UV, or manually install libraries.
 ... in the result viewer root directory:
+
 > uv sync
+
 > uv run main.py
+
 ... Then load your results via the GUI.
 
 
