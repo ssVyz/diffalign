@@ -1,7 +1,9 @@
 //! INI configuration file: defaults for analysis parameters.
 //!
 //! Lives next to the binary as `diffalign.ini`. CLI flags override values
-//! loaded from this file. A default file can be written via `--mkini`.
+//! loaded from this file. A default file can be written via `--mkini`. When
+//! the file is absent, the built-in defaults (`Config::default()`, identical
+//! to the `--mkini` values) are used.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use ini::Ini;
 
-use crate::analysis::{AlignerKind, AnalysisMethod, DEFAULT_MAX_SEEDS, PairwiseParams, SimpleParams};
+use crate::analysis::{AlignerKind, AnalysisMethod, PairwiseParams, SimpleParams};
 
 pub const INI_FILE_NAME: &str = "diffalign.ini";
 
@@ -17,7 +19,7 @@ pub const INI_FILE_NAME: &str = "diffalign.ini";
 ///
 /// Mirrors `AnalysisParams` but stores threads as a percentage of available
 /// cores; the percentage is resolved to a concrete core count at run time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub method: AnalysisMethod,
     /// INI-supplied default for the `fixed` method's ambiguity cap. Kept
@@ -55,25 +57,32 @@ pub struct Config {
     pub anchored_length: Option<u32>,
 }
 
+/// Built-in defaults. Identical to the values in `DEFAULT_INI_TEMPLATE` (what
+/// `--mkini` writes); used when no INI file exists and for keys missing from
+/// an INI. The `default_matches_ini_template` test keeps the two in sync.
+///
+/// Not to be confused with the serde omission values in `AnalysisParams`
+/// (e.g. `DEFAULT_MAX_SEEDS`, `AlignerKind::Pairwise`), which only govern
+/// which fields are left out of the result JSON.
 impl Default for Config {
     fn default() -> Self {
         Self {
             method: AnalysisMethod::NoAmbiguities,
             fixed_ambiguities: 1,
-            incremental_pct: 50,
+            incremental_pct: 66,
             incremental_max_amb: None,
-            aligner: AlignerKind::Pairwise,
+            aligner: AlignerKind::Simple,
             pairwise: PairwiseParams::default(),
-            simple: SimpleParams::default(),
+            simple: SimpleParams { max_mismatches: 10 },
             exclude_n: true,
-            min_oligo_length: 18,
-            max_oligo_length: 25,
+            min_oligo_length: 16,
+            max_oligo_length: 30,
             length_skip: 0,
             resolution: 1,
-            coverage_threshold: 90.0,
+            coverage_threshold: 95.0,
             threads_percent: 100,
-            var_limit: None,
-            max_seeds: DEFAULT_MAX_SEEDS,
+            var_limit: Some(15),
+            max_seeds: 1000,
             anchored: false,
             anchored_length: None,
         }
@@ -114,7 +123,8 @@ length_skip = 0
 resolution = 1
 
 ; Target cumulative variant coverage percentage (0-100).
-coverage_threshold = 99.0
+; Required for backwards compatibility.
+coverage_threshold = 95.0
 
 ; Maximum number of variants recorded per position.
 ; Leave empty (or 0) for no limit. When the limit is reached, the
@@ -214,7 +224,8 @@ pub fn load(path: &Path) -> Result<Config> {
     let method_str = get_str(analysis, "method").unwrap_or_else(|| "none".to_string());
     cfg.fixed_ambiguities = get_u32(analysis, "fixed_ambiguities")?.unwrap_or(cfg.fixed_ambiguities);
     cfg.incremental_pct = get_u32(analysis, "incremental_pct")?.unwrap_or(cfg.incremental_pct);
-    cfg.incremental_max_amb = get_optional_u32(analysis, "incremental_max_ambiguities")?;
+    cfg.incremental_max_amb =
+        get_optional_u32(analysis, "incremental_max_ambiguities", cfg.incremental_max_amb)?;
     cfg.method = parse_method(
         &method_str,
         cfg.fixed_ambiguities,
@@ -228,11 +239,11 @@ pub fn load(path: &Path) -> Result<Config> {
     cfg.resolution = get_u32(analysis, "resolution")?.unwrap_or(cfg.resolution);
     cfg.coverage_threshold =
         get_f64(analysis, "coverage_threshold")?.unwrap_or(cfg.coverage_threshold);
-    // var_limit: empty or 0 means unlimited.
-    cfg.var_limit = get_optional_u32(analysis, "var_limit")?.filter(|&n| n > 0);
+    // var_limit: empty or 0 means unlimited; a missing key keeps the default.
+    cfg.var_limit = get_optional_u32(analysis, "var_limit", cfg.var_limit)?.filter(|&n| n > 0);
     cfg.max_seeds = get_u32(analysis, "max_seeds")?.unwrap_or(cfg.max_seeds);
     cfg.anchored = get_bool(analysis, "anchored")?.unwrap_or(cfg.anchored);
-    cfg.anchored_length = get_optional_u32(analysis, "anchored_length")?;
+    cfg.anchored_length = get_optional_u32(analysis, "anchored_length", cfg.anchored_length)?;
 
     // [aligner]
     let aligner = ini.section(Some("aligner"));
@@ -355,9 +366,17 @@ fn get_u32(section: Option<&ini::Properties>, key: &str) -> Result<Option<u32>> 
     }
 }
 
-fn get_optional_u32(section: Option<&ini::Properties>, key: &str) -> Result<Option<u32>> {
-    // Same as get_u32 but the empty-string treatment in get_str already maps
-    // empty to None, which is exactly what we want for "unlimited".
+/// For settings where an empty value means "unlimited" / "not set". A key
+/// that is missing altogether keeps `default` instead.
+fn get_optional_u32(
+    section: Option<&ini::Properties>,
+    key: &str,
+    default: Option<u32>,
+) -> Result<Option<u32>> {
+    if section.and_then(|s| s.get(key)).is_none() {
+        return Ok(default);
+    }
+    // The empty-string treatment in get_str already maps empty to None.
     get_u32(section, key)
 }
 
@@ -396,18 +415,34 @@ fn get_bool(section: Option<&ini::Properties>, key: &str) -> Result<Option<bool>
 mod tests {
     use super::*;
 
+    /// An INI-less run uses `Config::default()`; a `--mkini` run uses the
+    /// template. Both must produce the same configuration.
     #[test]
-    fn parses_default_template() {
+    fn default_matches_ini_template() {
         let dir = tempdir();
         let path = dir.join("diffalign.ini");
         fs::write(&path, DEFAULT_INI_TEMPLATE).unwrap();
         let cfg = load(&path).unwrap();
-        assert_eq!(cfg.method, AnalysisMethod::NoAmbiguities);
-        assert_eq!(cfg.min_oligo_length, 18);
-        assert_eq!(cfg.max_oligo_length, 25);
-        assert_eq!(cfg.length_skip, 0);
-        assert_eq!(cfg.threads_percent, 100);
-        assert!(cfg.exclude_n);
+        assert_eq!(cfg, Config::default());
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn missing_keys_fall_back_to_defaults() {
+        let dir = tempdir();
+        let path = dir.join("diffalign.ini");
+        fs::write(&path, "").unwrap();
+        assert_eq!(load(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn empty_or_zero_var_limit_means_unlimited() {
+        let dir = tempdir();
+        let path = dir.join("diffalign.ini");
+        fs::write(&path, "[analysis]\nvar_limit =\n").unwrap();
+        assert_eq!(load(&path).unwrap().var_limit, None);
+        fs::write(&path, "[analysis]\nvar_limit = 0\n").unwrap();
+        assert_eq!(load(&path).unwrap().var_limit, None);
     }
 
     #[test]

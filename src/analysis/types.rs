@@ -59,7 +59,7 @@ impl ThreadCount {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PairwiseParams {
     pub match_score: i32,
     pub mismatch_score: i32,
@@ -84,7 +84,7 @@ impl Default for PairwiseParams {
 ///
 /// `max_mismatches` is the only knob the bitap algorithm needs. The four
 /// scoring fields on `PairwiseParams` are SW-specific and don't apply here.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SimpleParams {
     pub max_mismatches: u32,
 }

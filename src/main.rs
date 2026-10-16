@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -43,10 +43,7 @@ fn run() -> Result<()> {
         return cmd_check_config(&ini_path);
     }
 
-    let cfg = match load_or_prompt(&ini_path)? {
-        Some(cfg) => cfg,
-        None => return Ok(()),
-    };
+    let cfg = load_config(&ini_path, cli.config.is_some())?;
 
     let template_path = cli
         .template
@@ -174,7 +171,7 @@ fn cmd_mkini(path: &Path) -> Result<()> {
 fn cmd_check_config(path: &Path) -> Result<()> {
     println!("config path: {}", path.display());
     if !path.exists() {
-        println!("status: missing");
+        println!("status: missing (runs will use the built-in defaults)");
         std::process::exit(2);
     }
     match config::load(path) {
@@ -189,39 +186,19 @@ fn cmd_check_config(path: &Path) -> Result<()> {
     }
 }
 
-/// Load the INI, or — if it's missing and we're on a TTY — ask whether to
-/// create it. Returns `Ok(None)` when the user declined and the program
-/// should exit cleanly.
-fn load_or_prompt(path: &Path) -> Result<Option<Config>> {
-    if path.exists() {
-        return config::load(path).map(Some);
+/// Load the INI if present. A missing INI at the default location (next to
+/// the binary) is not an error: the built-in defaults, which match what
+/// `--mkini` writes, are used instead. A file named explicitly via
+/// `--config` must exist.
+fn load_config(path: &Path, explicit: bool) -> Result<Config> {
+    if explicit || path.exists() {
+        return config::load(path);
     }
-
-    eprintln!("No config file found at {}", path.display());
-
-    if !io::stdin().is_terminal() {
-        bail!(
-            "no diffalign.ini found at {}. Run `diffalign --mkini` to create one.",
-            path.display()
-        );
-    }
-
-    eprint!("Create one with default values? [y/N]: ");
-    io::stderr().flush().ok();
-
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .context("reading confirmation")?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if !(answer == "y" || answer == "yes") {
-        eprintln!("aborting; run `diffalign --mkini` to create one later.");
-        return Ok(None);
-    }
-
-    config::write_default_ini(path)?;
-    eprintln!("created default config at {}", path.display());
-    config::load(path).map(Some)
+    eprintln!(
+        "note: no diffalign.ini found at {}; using built-in defaults (run `diffalign --mkini` to write them to a file)",
+        path.display()
+    );
+    Ok(Config::default())
 }
 
 fn read_template(path: &PathBuf) -> Result<diffalign::analysis::TemplateData> {

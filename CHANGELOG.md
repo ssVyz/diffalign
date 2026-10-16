@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-12
+## [1.0.1] - 2026-10-16
+
+### Changed
+- diffalign now runs without a `diffalign.ini`. If no INI exists next to the
+  binary, it uses the built-in defaults and prints a note, instead of asking
+  to create the file (interactive) or exiting with an error (scripts and
+  pipes). A file named explicitly with `--config` must still exist.
+  `--check-config` still reports a missing INI with exit code 2, and now
+  says that the built-in defaults will be used.
+- The built-in defaults now match the INI written by `--mkini`: `simple`
+  (bitap) aligner with `max_mismatches = 10`, oligo lengths 16–30, coverage
+  threshold 95%, `var_limit = 15`, `max_seeds = 1000`, and
+  `incremental_pct = 66`. They also apply to any key missing from an
+  existing INI.
+- A `var_limit` key that is missing from the INI now falls back to the
+  default (15) instead of meaning "unlimited". An empty value or `0` still
+  means unlimited.
 
 ### Added
 - diffalign is now dual-licensed under the MIT License and the Apache License,
